@@ -1,0 +1,20 @@
+scheduler:
+  name: "gpu-scheduler"
+  port: 8888
+  metricsPort: 9090
+
+queue:
+  maxSize: 1000
+  defaultPolicy: "fifo"  # fifo | binpack
+
+gpu:
+  pollIntervalSeconds: 5
+  mockMode: true  # set false in production
+
+kubernetes:
+  kubeconfig: ""  # empty = in-cluster
+  namespace: "default"
+
+logging:
+  level: "info"  # debug | info | warn | error
+  format: "json"  # json | text
