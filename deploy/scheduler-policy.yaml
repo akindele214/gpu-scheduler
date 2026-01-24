@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scheduler-policy
+  namespace: kube-system
+data:
+  policy.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    profiles:
+      - schedulerName: gpu-scheduler
+    extenders:
+      - urlPrefix: "http://gpu-scheduler.kube-system.svc.cluster.local:8888"
+        filterVerb: "filter"
+        prioritizeVerb: "prioritize"
+        bindVerb: "bind"
+        weight: 1
+        enableHTTPS: false
+        managedResources:
+          - name: "nvidia.com/gpu"
+            ignoredByScheduler: true

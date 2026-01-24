@@ -253,10 +253,15 @@ func (e *Extender) BindHandler(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, schedulerapi.ExtenderBindingResult{})
 }
 
+func (e *Extender) HealthHandler(w http.ResponseWriter, r *http.Request) {
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (e *Extender) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/filter", e.FilterHandler)
 	mux.HandleFunc("/prioritize", e.PrioritizeHandler)
 	mux.HandleFunc("/bind", e.BindHandler)
+	mux.HandleFunc("/healthz", e.HealthHandler)
 }
 
 func WriteJSON(w http.ResponseWriter, status int, data any) {

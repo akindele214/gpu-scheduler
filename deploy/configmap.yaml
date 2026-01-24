@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-scheduler-config
+  namespace: kube-system
+data:
+  config.yaml: |
+    scheduler:
+      name: "gpu-scheduler"
+      port: 8888
+      metricsPort: 9090
+    queue:
+      maxSize: 1000
+      defaultPolicy: "fifo"
+    gpu:
+      pollIntervalSeconds: 5
+      mockMode: true
+    kubernetes:
+      kubeconfig: ""
+      namespace: "default"
+    logging:
+      level: "info"
+      format: "json"

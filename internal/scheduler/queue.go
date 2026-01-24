@@ -17,7 +17,7 @@ type FIFOQueue struct {
 func NewFIFOQueue(maxSize int) *FIFOQueue {
 	return &FIFOQueue{
 		maxSize: maxSize,
-		jobs:    make([]*types.Job, maxSize),
+		jobs:    make([]*types.Job, 0, maxSize),
 	}
 }
 
