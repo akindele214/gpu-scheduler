@@ -9,7 +9,7 @@ queue:
 
 gpu:
   pollIntervalSeconds: 5
-  mockMode: true  # set false in production
+  mockMode: false  # set false in production
 
 kubernetes:
   kubeconfig: ""  # empty = in-cluster
