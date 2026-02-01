@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/akindele214/gpu-scheduler/internal/allocator"
@@ -25,40 +24,40 @@ type Extender struct {
 	kubeClient kubernetes.Interface
 }
 
-func getGPUMemoryFromPod(pod *v1.Pod) int {
-	value, exists := pod.Annotations["gpu-scheduler/memory-mb"]
-	if exists {
-		memory, err := strconv.Atoi(value)
-		if err == nil {
-			return memory
-		}
-	}
+// func GetGPUMemoryFromPod(pod *v1.Pod) int {
+// 	value, exists := pod.Annotations["gpu-scheduler/memory-mb"]
+// 	if exists {
+// 		memory, err := strconv.Atoi(value)
+// 		if err == nil {
+// 			return memory
+// 		}
+// 	}
 
-	for _, container := range pod.Spec.Containers {
-		if quantity, exists := container.Resources.Requests["nvidia.com/gpu-memory"]; exists {
-			// Convert bytes to MB
-			return int(quantity.Value() / (1024 * 1024))
-		}
-	}
+// 	for _, container := range pod.Spec.Containers {
+// 		if quantity, exists := container.Resources.Requests["nvidia.com/gpu-memory"]; exists {
+// 			// Convert bytes to MB
+// 			return int(quantity.Value() / (1024 * 1024))
+// 		}
+// 	}
 
-	return 0
-}
+// 	return 0
+// }
 
-func getWorkflowFromPod(pod *v1.Pod) types.WorkflowType {
-	value, exists := pod.Annotations["gpu-scheduler/workflow"]
-	if exists {
-		switch value {
+// func GetWorkflowFromPod(pod *v1.Pod) types.WorkflowType {
+// 	value, exists := pod.Annotations["gpu-scheduler/workflow"]
+// 	if exists {
+// 		switch value {
 
-		case "build":
-			return types.Build
-		case "train":
-			return types.Train
-		case "inference":
-			return types.Inference
-		}
-	}
-	return types.Inference
-}
+// 		case "build":
+// 			return types.Build
+// 		case "train":
+// 			return types.Train
+// 		case "inference":
+// 			return types.Inference
+// 		}
+// 	}
+// 	return types.Inference
+// }
 
 func NewExtender(alloc *allocator.Allocator, kubeClient kubernetes.Interface) *Extender {
 	return &Extender{
@@ -85,7 +84,7 @@ func (e *Extender) FilterHandler(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "Nodes list is required")
 		return
 	}
-	memoryMB := getGPUMemoryFromPod(extenderArg.Pod)
+	memoryMB := GetGPUMemoryFromPod(extenderArg.Pod)
 	nodes := e.allocator.GetNodes()
 
 	passedNodes := make([]v1.Node, 0)
@@ -148,7 +147,7 @@ func (e *Extender) PrioritizeHandler(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "Nodes list is required")
 		return
 	}
-	memoryMB := getGPUMemoryFromPod(extenderArg.Pod)
+	memoryMB := GetGPUMemoryFromPod(extenderArg.Pod)
 	nodes := e.allocator.GetNodes()
 
 	scores := make([]schedulerapi.HostPriority, 0)
@@ -215,10 +214,10 @@ func (e *Extender) BindHandler(w http.ResponseWriter, r *http.Request) {
 		ID:        uuid.New(),
 		Name:      extenderArgs.PodName,
 		Namespace: extenderArgs.PodNamespace,
-		MemoryMB:  getGPUMemoryFromPod(pod),
+		MemoryMB:  GetGPUMemoryFromPod(pod),
 		GPUCount:  1,
 		Status:    types.Pending,
-		Workflow:  getWorkflowFromPod(pod), // optional: check annotation
+		Workflow:  GetWorkflowFromPod(pod), // optional: check annotation
 		CreatedAt: time.Now(),
 	}
 

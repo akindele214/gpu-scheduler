@@ -2,6 +2,7 @@ scheduler:
   name: "gpu-scheduler"
   port: 8888
   metricsPort: 9090
+  mode: "standalone"
 
 queue:
   maxSize: 1000
