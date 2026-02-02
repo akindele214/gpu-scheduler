@@ -1,6 +1,6 @@
 # GPU-Scheduler
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/gpu-scheduler)](https://goreportcard.com/report/github.com/yourusername/gpu-scheduler)
+[![Go Report Card](https://goreportcard.com/badge/github.com/akindele214/gpu-scheduler)](https://goreportcard.com/report/github.com/akindele214/gpu-scheduler)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Go Version](https://img.shields.io/badge/Go-1.21-blue)](https://golang.org/)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.28%2B-blue)](https://kubernetes.io/)
@@ -153,7 +153,7 @@ Integrations: NVIDIA GPU Operator, vLLM (for LLM inference), Ray/KubeRay, Kubefl
 1. Clone the repo:
 
    ```
-   git clone https://github.com/yourusername/gpu-scheduler.git
+   git clone https://github.com/akindele214/gpu-scheduler.git
    cd gpu-scheduler
    ```
 2. Build the binary:

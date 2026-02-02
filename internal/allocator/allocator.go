@@ -7,6 +7,8 @@ import (
 	"github.com/akindele214/gpu-scheduler/pkg/types"
 )
 
+// SchedulingStrategy defines how jobs get assigned to nodes
+
 type Allocator struct {
 	binPacker *BinPacker
 	manager   *gpu.Manager

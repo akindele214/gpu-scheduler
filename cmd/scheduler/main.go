@@ -47,6 +47,7 @@ type Scheduler struct {
 	manager   *gpu.Manager
 	allocator *allocator.Allocator
 	extender  *scheduler.Extender
+	watcher   *scheduler.Watcher
 	server    *http.Server
 	stopCh    chan struct{}
 }
@@ -58,64 +59,105 @@ func NewScheduler() (*Scheduler, error) {
 		return nil, err
 	}
 
-	// 2. Create GPU discoverer (mock or real)
+	// 2. Create K8s client first (needed for K8s discoverer)
+	kubeClient, err := buildKubeClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kube client: %w", err)
+	}
+
+	// 3. Create GPU discoverer based on mode
 	var discoverer gpu.GPUDiscoverer
 	if cfg.GPU.MockMode {
-
 		discoverer = gpu.NewMockDiscoverer(cfg.Scheduler.Name, []gpu.MockGPUConfig{
 			{TotalMemoryMB: 81920, UsedMemoryMB: 0, IsHealthy: true}, // 80GB GPU
 			{TotalMemoryMB: 81920, UsedMemoryMB: 0, IsHealthy: true}, // 80GB GPU
 		})
+	} else if cfg.Scheduler.Mode == "standalone" {
+		// In standalone mode, use K8s API to discover GPUs
+		clientset, ok := kubeClient.(*kubernetes.Clientset)
+		if !ok || clientset == nil {
+			return nil, fmt.Errorf("standalone mode requires a valid Kubernetes client")
+		}
+		discoverer, err = gpu.NewK8sDiscoverer(clientset)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create K8s discoverer: %w", err)
+		}
 	} else {
-
+		// Extender mode with real NVML (for bare-metal/self-managed K8s)
 		discoverer, err = gpu.NewNVMLDiscoverer(cfg.Scheduler.Name)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	// 3. Create Manager
+	// 4. Create Manager
 	manager, err := gpu.NewManager(discoverer, cfg.Scheduler.Name)
-
 	if err != nil {
 		return nil, err
 	}
-	// 4. Create Allocator
+
+	// 5. Create Allocator
 	alloc := allocator.NewAllocator(manager)
 
-	// 5. Create K8s client
-	kubeClient, err := buildKubeClient()
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to create kube client: %w", err)
-	}
-	// 6. Create Extender
-	ext := scheduler.NewExtender(alloc, kubeClient)
-
-	// 7. Create HTTP server
-	mux := http.NewServeMux()
-	ext.RegisterRoutes(mux)
-
-	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Scheduler.Port),
-		Handler: mux,
-	}
-
-	return &Scheduler{
+	s := &Scheduler{
 		config:    cfg,
 		manager:   manager,
 		allocator: alloc,
-		extender:  ext,
-		server:    server,
 		stopCh:    make(chan struct{}),
-	}, nil
+	}
+	// 6. Create Extender or Watcher based on mode
+	if cfg.Scheduler.Mode == "standalone" {
+		clientset, ok := kubeClient.(*kubernetes.Clientset)
+		if !ok || clientset == nil {
+			return nil, fmt.Errorf("standalone mode requires a valid Kubernetes client")
+		}
+		var strategy allocator.SchedulingStrategy
+		if cfg.Queue.DefaultPolicy == "binpack" {
+			strategy = allocator.NewBinPacker()
+		} else {
+			strategy = allocator.NewFIFOScheduler()
+		}
+
+		s.watcher = scheduler.NewWatcher(
+			clientset,
+			manager,
+			strategy, // Pass the BinPacker
+			cfg.Scheduler.Name,
+			cfg.GPU.PollIntervalSeconds,
+		)
+		log.Println("Running in STANDALONE mode")
+
+	} else {
+		// Extender mode
+		ext := scheduler.NewExtender(alloc, kubeClient)
+
+		// Create HTTP server
+		mux := http.NewServeMux()
+		ext.RegisterRoutes(mux)
+
+		s.server = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.Scheduler.Port),
+			Handler: mux,
+		}
+		s.extender = ext
+		log.Println("Running in EXTENDER mode")
+	}
+
+	return s, nil
 }
 
 func (s *Scheduler) Run() error {
 	// Start background GPU refresh loop
 	go s.refreshLoop()
 
-	log.Printf("Starting GPU scheduler on port %d", s.config.Scheduler.Port)
+	if s.config.Scheduler.Mode == "standalone" {
+		log.Println("Starting GPU scheduler in STANDALONE mode (watcher)")
+		s.watcher.Run() // This blocks
+		return nil
+	}
+
+	// Extender mode
+	log.Printf("Starting GPU scheduler in EXTENDER mode on port %d", s.config.Scheduler.Port)
 	err := s.server.ListenAndServe()
 	if err != nil && err != http.ErrServerClosed {
 		return err
@@ -126,10 +168,11 @@ func (s *Scheduler) Run() error {
 func (s *Scheduler) Stop() {
 	close(s.stopCh)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	s.server.Shutdown(ctx)
+	if s.server != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.server.Shutdown(ctx)
+	}
 }
 
 func (s *Scheduler) refreshLoop() {

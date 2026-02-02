@@ -29,28 +29,51 @@ func NewManager(discoverer GPUDiscoverer, nodeName string) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Count healthy GPUs
-	availableCount := 0
+
+	// Group GPUs by node name
+	nodeGPUs := make(map[string][]types.GPU)
 	for _, gpu := range gpus {
-		if gpu.IsHealthy {
-			availableCount++
+		actualNodeName := gpu.NodeName
+		if actualNodeName == "" {
+			actualNodeName = nodeName // Fallback for mock mode
+		}
+		nodeGPUs[actualNodeName] = append(nodeGPUs[actualNodeName], gpu)
+	}
+
+	// Create NodeInfo for each node
+	nodes := make(map[string]*types.NodeInfo)
+	for name, gpuList := range nodeGPUs {
+		availableCount := 0
+		for _, gpu := range gpuList {
+			if gpu.IsHealthy {
+				availableCount++
+			}
+		}
+		nodes[name] = &types.NodeInfo{
+			Name:          name,
+			GPUs:          gpuList,
+			TotalGPUs:     len(gpuList),
+			AvailableGPUs: availableCount,
+			Labels:        make(map[string]string),
+			Conditions:    []string{"Ready"},
 		}
 	}
-	allocations := map[uuid.UUID]*Allocation{}
-	nodeInfo := &types.NodeInfo{
-		Name:          nodeName,
-		GPUs:          gpus,
-		TotalGPUs:     len(gpus),
-		AvailableGPUs: availableCount,
-		Labels:        make(map[string]string),
-		Conditions:    []string{"Ready"},
+
+	// If no GPUs found, create empty node entry for mock mode
+	if len(nodes) == 0 {
+		nodes[nodeName] = &types.NodeInfo{
+			Name:          nodeName,
+			GPUs:          gpus,
+			TotalGPUs:     0,
+			AvailableGPUs: 0,
+			Labels:        make(map[string]string),
+			Conditions:    []string{"Ready"},
+		}
 	}
-	nodes := make(map[string]*types.NodeInfo)
-	nodes[nodeName] = nodeInfo
 
 	return &Manager{
 		discoverer:  discoverer,
-		allocations: allocations,
+		allocations: make(map[uuid.UUID]*Allocation),
 		nodes:       nodes,
 	}, nil
 }
