@@ -55,7 +55,7 @@ gpu-scheduler/
 ### Tasks
 
 1. **Project Scaffolding** (`cmd/scheduler/main.go`, `go.mod`)
-   - Initialize Go module: `github.com/yourusername/gpu-scheduler`.
+   - Initialize Go module: `github.com/akindele214/gpu-scheduler`.
    - Set up main entry point with flag parsing and config loading.
    - Dependencies: `k8s.io/client-go`, `sigs.k8s.io/controller-runtime`, `github.com/NVIDIA/go-nvml`.
 
