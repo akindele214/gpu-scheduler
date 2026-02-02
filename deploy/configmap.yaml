@@ -9,12 +9,13 @@ data:
       name: "gpu-scheduler"
       port: 8888
       metricsPort: 9090
+      mode: "standalone"
     queue:
       maxSize: 1000
       defaultPolicy: "fifo"
     gpu:
       pollIntervalSeconds: 5
-      mockMode: true
+      mockMode: false
     kubernetes:
       kubeconfig: ""
       namespace: "default"

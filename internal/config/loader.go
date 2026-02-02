@@ -16,6 +16,7 @@ func Load() (*Config, error) {
 
 	viper.SetDefault("scheduler.port", 8888)
 	viper.SetDefault("scheduler.metricsPort", 9090)
+	viper.SetDefault("scheduler.mode", "standalone")
 	viper.SetDefault("queue.defaultPolicy", "fifo")
 	viper.SetDefault("gpu.pollIntervalSeconds", 5)
 	viper.SetDefault("kubernetes.namespace", "default")

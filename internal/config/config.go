@@ -14,6 +14,7 @@ type SchedulerConfig struct {
 	Name        string `mapstructure:"name"`
 	Port        int    `mapstructure:"port"`
 	MetricsPort int    `mapstructure:"metricsPort"`
+	Mode        string `mapstructure:mode`
 }
 
 type QueueConfig struct {
