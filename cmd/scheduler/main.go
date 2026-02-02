@@ -59,37 +59,45 @@ func NewScheduler() (*Scheduler, error) {
 		return nil, err
 	}
 
-	// 2. Create GPU discoverer (mock or real)
+	// 2. Create K8s client first (needed for K8s discoverer)
+	kubeClient, err := buildKubeClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kube client: %w", err)
+	}
+
+	// 3. Create GPU discoverer based on mode
 	var discoverer gpu.GPUDiscoverer
 	if cfg.GPU.MockMode {
-
 		discoverer = gpu.NewMockDiscoverer(cfg.Scheduler.Name, []gpu.MockGPUConfig{
 			{TotalMemoryMB: 81920, UsedMemoryMB: 0, IsHealthy: true}, // 80GB GPU
 			{TotalMemoryMB: 81920, UsedMemoryMB: 0, IsHealthy: true}, // 80GB GPU
 		})
+	} else if cfg.Scheduler.Mode == "standalone" {
+		// In standalone mode, use K8s API to discover GPUs
+		clientset, ok := kubeClient.(*kubernetes.Clientset)
+		if !ok || clientset == nil {
+			return nil, fmt.Errorf("standalone mode requires a valid Kubernetes client")
+		}
+		discoverer, err = gpu.NewK8sDiscoverer(clientset)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create K8s discoverer: %w", err)
+		}
 	} else {
-
+		// Extender mode with real NVML (for bare-metal/self-managed K8s)
 		discoverer, err = gpu.NewNVMLDiscoverer(cfg.Scheduler.Name)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	// 3. Create Manager
+	// 4. Create Manager
 	manager, err := gpu.NewManager(discoverer, cfg.Scheduler.Name)
-
 	if err != nil {
 		return nil, err
 	}
-	// 4. Create Allocator
+
+	// 5. Create Allocator
 	alloc := allocator.NewAllocator(manager)
-
-	// 5. Create K8s client
-	kubeClient, err := buildKubeClient()
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to create kube client: %w", err)
-	}
 
 	s := &Scheduler{
 		config:    cfg,

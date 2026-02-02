@@ -24,41 +24,6 @@ type Extender struct {
 	kubeClient kubernetes.Interface
 }
 
-// func GetGPUMemoryFromPod(pod *v1.Pod) int {
-// 	value, exists := pod.Annotations["gpu-scheduler/memory-mb"]
-// 	if exists {
-// 		memory, err := strconv.Atoi(value)
-// 		if err == nil {
-// 			return memory
-// 		}
-// 	}
-
-// 	for _, container := range pod.Spec.Containers {
-// 		if quantity, exists := container.Resources.Requests["nvidia.com/gpu-memory"]; exists {
-// 			// Convert bytes to MB
-// 			return int(quantity.Value() / (1024 * 1024))
-// 		}
-// 	}
-
-// 	return 0
-// }
-
-// func GetWorkflowFromPod(pod *v1.Pod) types.WorkflowType {
-// 	value, exists := pod.Annotations["gpu-scheduler/workflow"]
-// 	if exists {
-// 		switch value {
-
-// 		case "build":
-// 			return types.Build
-// 		case "train":
-// 			return types.Train
-// 		case "inference":
-// 			return types.Inference
-// 		}
-// 	}
-// 	return types.Inference
-// }
-
 func NewExtender(alloc *allocator.Allocator, kubeClient kubernetes.Interface) *Extender {
 	return &Extender{
 		allocator:  alloc,

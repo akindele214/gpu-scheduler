@@ -15,7 +15,7 @@ data:
       defaultPolicy: "fifo"
     gpu:
       pollIntervalSeconds: 5
-      mockMode: true
+      mockMode: false
     kubernetes:
       kubeconfig: ""
       namespace: "default"
