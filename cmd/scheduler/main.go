@@ -124,6 +124,7 @@ func NewScheduler() (*Scheduler, error) {
 			strategy, // Pass the BinPacker
 			cfg.Scheduler.Name,
 			cfg.GPU.PollIntervalSeconds,
+			cfg.Workflows,
 		)
 		log.Println("Running in STANDALONE mode")
 

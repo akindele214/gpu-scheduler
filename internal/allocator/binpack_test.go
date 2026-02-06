@@ -17,6 +17,17 @@ func makeGPU(totalMB, usedMB int, healthy bool) types.GPU {
 	}
 }
 
+// Helper to create a test GPU with node name (for gang scheduling tests)
+func makeGPUWithNode(nodeName string, totalMB, usedMB int, healthy bool) types.GPU {
+	return types.GPU{
+		ID:            uuid.New(),
+		NodeName:      nodeName,
+		TotalMemoryMB: totalMB,
+		UsedMemoryMB:  usedMB,
+		IsHealthy:     healthy,
+	}
+}
+
 // Helper to create a test node with GPUs
 func makeNode(name string, gpus []types.GPU) types.NodeInfo {
 	return types.NodeInfo{
@@ -193,5 +204,294 @@ func TestSchedule_SkipsUnhealthyGPUs(t *testing.T) {
 	}
 	if result.NodeName != "node-2" {
 		t.Errorf("expected healthy GPU on 'node-2', got '%s'", result.NodeName)
+	}
+}
+
+func TestScheduleGang_MemoryPerGPU(t *testing.T) {
+	bp := NewBinPacker()
+
+	job := makeJob("gang-job", 8000) // 8GB per GPU
+
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeGPU(16000, 0, true),
+			makeGPU(16000, 0, true),
+		}),
+	}
+
+	result, err := bp.ScheduleGang(job, nodes, 2, types.MemoryPerGPU)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Placements) != 2 {
+		t.Errorf("expected 2 placements, got %d", len(result.Placements))
+	}
+
+	for i, p := range result.Placements {
+		if p.MemoryMB != 8000 {
+			t.Errorf("placement[%d]: expected MemoryMB 8000, got %d", i, p.MemoryMB)
+		}
+	}
+}
+
+func TestScheduleGang_MemoryTotal(t *testing.T) {
+	bp := NewBinPacker()
+
+	// 32GB total, distributed across 4 GPUs = 8GB each
+	job := makeJob("gang-job", 32000)
+
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeGPU(16000, 0, true),
+			makeGPU(16000, 0, true),
+			makeGPU(16000, 0, true),
+			makeGPU(16000, 0, true),
+		}),
+	}
+
+	result, err := bp.ScheduleGang(job, nodes, 4, types.MemoryTotal)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Placements) != 4 {
+		t.Errorf("expected 4 placements, got %d", len(result.Placements))
+	}
+	// 32000 / 4 = 8000 per GPU
+	for i, p := range result.Placements {
+		if p.MemoryMB != 8000 {
+			t.Errorf("placement[%d]: expected MemoryMB 8000, got %d", i, p.MemoryMB)
+		}
+	}
+}
+
+func TestScheduleGang_MemoryTotal_RoundsUp(t *testing.T) {
+	bp := NewBinPacker()
+
+	// 10GB total, distributed across 3 GPUs
+	// 10000 / 3 = 3333.33... → should round UP to 3334 per GPU
+	job := makeJob("gang-job", 10000)
+
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeGPU(16000, 0, true),
+			makeGPU(16000, 0, true),
+			makeGPU(16000, 0, true),
+		}),
+	}
+
+	result, err := bp.ScheduleGang(job, nodes, 3, types.MemoryTotal)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Placements) != 3 {
+		t.Errorf("expected 3 placements, got %d", len(result.Placements))
+	}
+	// (10000 + 3 - 1) / 3 = 10002 / 3 = 3334
+	expectedMemory := 3334
+	for i, p := range result.Placements {
+		if p.MemoryMB != expectedMemory {
+			t.Errorf("placement[%d]: expected MemoryMB %d (rounded up), got %d", i, expectedMemory, p.MemoryMB)
+		}
+	}
+}
+
+func TestScheduleGang_MemoryNone(t *testing.T) {
+	bp := NewBinPacker()
+
+	// MemoryNone: job.MemoryMB is ignored, just need GPU count
+	job := makeJob("gang-job", 50000) // This should be ignored
+
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeGPU(8000, 0, true), // Small GPUs - would fail if memory was checked
+			makeGPU(8000, 0, true),
+			makeGPU(8000, 0, true),
+		}),
+	}
+
+	result, err := bp.ScheduleGang(job, nodes, 3, types.MemoryNone)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Placements) != 3 {
+		t.Errorf("expected 3 placements, got %d", len(result.Placements))
+	}
+	// Memory should be 0 for MemoryNone mode
+	for i, p := range result.Placements {
+		if p.MemoryMB != 0 {
+			t.Errorf("placement[%d]: expected MemoryMB 0 for MemoryNone, got %d", i, p.MemoryMB)
+		}
+	}
+}
+
+func TestScheduleGang_NotEnoughGPUs(t *testing.T) {
+	bp := NewBinPacker()
+
+	job := makeJob("gang-job", 8000)
+
+	// Only 2 GPUs available, but we need 4
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeGPU(16000, 0, true),
+			makeGPU(16000, 0, true),
+		}),
+	}
+
+	_, err := bp.ScheduleGang(job, nodes, 4, types.MemoryPerGPU)
+	if err == nil {
+		t.Error("expected error for insufficient GPU count, got nil")
+	}
+}
+
+func TestScheduleGang_NotEnoughMemory(t *testing.T) {
+	bp := NewBinPacker()
+
+	// Need 32GB per GPU
+	job := makeJob("gang-job", 32000)
+
+	// GPUs only have 16GB each
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeGPU(16000, 0, true),
+			makeGPU(16000, 0, true),
+		}),
+	}
+
+	_, err := bp.ScheduleGang(job, nodes, 2, types.MemoryPerGPU)
+	if err == nil {
+		t.Error("expected error for insufficient memory, got nil")
+	}
+}
+
+func TestScheduleGang_BestFit_SelectsLeastWaste(t *testing.T) {
+	bp := NewBinPacker()
+
+	job := makeJob("gang-job", 8000) // 8GB per GPU
+
+	// Mix of GPU sizes - should pick the ones with least waste
+	gpu1 := makeGPU(80000, 0, true) // 72GB waste
+	gpu2 := makeGPU(16000, 0, true) // 8GB waste (BEST)
+	gpu3 := makeGPU(10000, 0, true) // 2GB waste (BEST)
+	gpu4 := makeGPU(40000, 0, true) // 32GB waste
+
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{gpu1, gpu2}),
+		makeNode("node-2", []types.GPU{gpu3, gpu4}),
+	}
+
+	result, err := bp.ScheduleGang(job, nodes, 2, types.MemoryPerGPU)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Placements) != 2 {
+		t.Errorf("expected 2 placements, got %d", len(result.Placements))
+	}
+
+	// Should have picked gpu3 (2GB waste) and gpu2 (8GB waste)
+	// Total waste = 10GB, not 104GB if it picked gpu1+gpu4
+	totalWaste := 0
+	for _, p := range result.Placements {
+		// Find the GPU that was selected and calculate waste
+		for _, node := range nodes {
+			for _, gpu := range node.GPUs {
+				if gpu.ID == p.GPUID {
+					totalWaste += gpu.AvailableMemoryMB() - p.MemoryMB
+				}
+			}
+		}
+	}
+
+	// 10000-8000 + 16000-8000 = 2000 + 8000 = 10000
+	if totalWaste != 10000 {
+		t.Errorf("expected total waste of 10000MB (best fit), got %d", totalWaste)
+	}
+}
+
+func TestScheduleGang_SkipsUnhealthyGPUs(t *testing.T) {
+	bp := NewBinPacker()
+
+	job := makeJob("gang-job", 8000)
+
+	// 4 GPUs but 2 are unhealthy
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeGPU(16000, 0, true),
+			makeGPU(16000, 0, false), // unhealthy
+			makeGPU(16000, 0, true),
+			makeGPU(16000, 0, false), // unhealthy
+		}),
+	}
+
+	result, err := bp.ScheduleGang(job, nodes, 2, types.MemoryPerGPU)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Placements) != 2 {
+		t.Errorf("expected 2 placements, got %d", len(result.Placements))
+	}
+}
+
+func TestScheduleGang_SkipsUnhealthyGPUs_NotEnough(t *testing.T) {
+	bp := NewBinPacker()
+
+	job := makeJob("gang-job", 8000)
+
+	// 4 GPUs but 3 are unhealthy - only 1 healthy
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeGPU(16000, 0, true),
+			makeGPU(16000, 0, false),
+			makeGPU(16000, 0, false),
+			makeGPU(16000, 0, false),
+		}),
+	}
+
+	_, err := bp.ScheduleGang(job, nodes, 2, types.MemoryPerGPU)
+	if err == nil {
+		t.Error("expected error when not enough healthy GPUs, got nil")
+	}
+}
+
+func TestScheduleGang_AcrossMultipleNodes(t *testing.T) {
+	bp := NewBinPacker()
+
+	job := makeJob("gang-job", 8000)
+
+	// 1 GPU per node, need 3 GPUs - use makeGPUWithNode so NodeName is set
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{makeGPUWithNode("node-1", 16000, 0, true)}),
+		makeNode("node-2", []types.GPU{makeGPUWithNode("node-2", 16000, 0, true)}),
+		makeNode("node-3", []types.GPU{makeGPUWithNode("node-3", 16000, 0, true)}),
+	}
+
+	result, err := bp.ScheduleGang(job, nodes, 3, types.MemoryPerGPU)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Placements) != 3 {
+		t.Errorf("expected 3 placements, got %d", len(result.Placements))
+	}
+
+	// Verify we got GPUs from all 3 nodes
+	nodesSeen := make(map[string]bool)
+	for _, p := range result.Placements {
+		nodesSeen[p.NodeName] = true
+	}
+	if len(nodesSeen) != 3 {
+		t.Errorf("expected placements across 3 nodes, got %d unique nodes", len(nodesSeen))
+	}
+}
+
+func TestScheduleGang_NilJob(t *testing.T) {
+	bp := NewBinPacker()
+
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{makeGPU(16000, 0, true)}),
+	}
+
+	_, err := bp.ScheduleGang(nil, nodes, 1, types.MemoryPerGPU)
+	if err == nil {
+		t.Error("expected error for nil job, got nil")
 	}
 }

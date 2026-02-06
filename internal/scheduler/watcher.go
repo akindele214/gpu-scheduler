@@ -3,9 +3,11 @@ package scheduler
 import (
 	"context"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/akindele214/gpu-scheduler/internal/allocator"
+	"github.com/akindele214/gpu-scheduler/internal/config"
 	"github.com/akindele214/gpu-scheduler/internal/gpu"
 	"github.com/akindele214/gpu-scheduler/pkg/types"
 	"github.com/google/uuid"
@@ -20,15 +22,17 @@ type Watcher struct {
 	strategy      allocator.SchedulingStrategy // Interface, not concrete type
 	schedulerName string
 	pollInterval  int
+	workflowCfg   config.WorkflowConfig
 }
 
-func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, allocator allocator.SchedulingStrategy, schedulerName string, pollInterval int) *Watcher {
+func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, allocator allocator.SchedulingStrategy, schedulerName string, pollInterval int, workflowCfg config.WorkflowConfig) *Watcher {
 	return &Watcher{
 		clientSet:     client,
 		gpuManager:    gpuManager,
 		strategy:      allocator,
 		schedulerName: schedulerName,
 		pollInterval:  pollInterval,
+		workflowCfg:   workflowCfg,
 	}
 }
 
@@ -50,12 +54,25 @@ func (w *Watcher) processQueue() {
 		return
 	}
 
+	var pendingPods []corev1.Pod
 	for _, pod := range pods.Items {
 		if pod.Spec.SchedulerName == w.schedulerName &&
 			pod.Status.Phase == corev1.PodPending &&
 			pod.Spec.NodeName == "" {
-			w.schedulePod(&pod)
+			pendingPods = append(pendingPods, pod)
 		}
+	}
+
+	if len(pendingPods) == 0 {
+		return
+	}
+	sort.Slice(pendingPods, func(i, j int) bool {
+		priorityI := GetPriorityFromPod(&pendingPods[i], w.workflowCfg)
+		priorityJ := GetPriorityFromPod(&pendingPods[j], w.workflowCfg)
+		return priorityI > priorityJ
+	})
+	for _, pod := range pendingPods {
+		w.schedulePod(&pod)
 	}
 }
 

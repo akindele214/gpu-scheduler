@@ -12,6 +12,21 @@ gpu:
   pollIntervalSeconds: 5
   mockMode: false  # set false in production
 
+workflows:
+  enabled: true
+  allowCustom: true
+  defaultPriority: 50
+  types:
+    - name: "inference"
+      priority: 100
+      preemptible: false
+    - name: "training"
+      priority: 50
+      preemptible: false
+    - name: "build"
+      priority: 10
+      preemptible: true
+
 kubernetes:
   kubeconfig: ""  # empty = in-cluster
   namespace: "default"
