@@ -294,9 +294,9 @@ func runWorkloadTest(manager *gpu.Manager, nodes []types.NodeInfo, gpuCount int)
 		return false
 	}
 
-	// Check torchrun is available
-	if _, err := exec.LookPath("torchrun"); err != nil {
-		fmt.Printf("  %sFAIL%s torchrun not found in PATH (pip install torch)\n", colorRed, colorReset)
+	// Check python3 is available
+	if _, err := exec.LookPath("python3"); err != nil {
+		fmt.Printf("  %sFAIL%s python3 not found in PATH\n", colorRed, colorReset)
 		return false
 	}
 
@@ -350,10 +350,10 @@ func runWorkloadTest(manager *gpu.Manager, nodes []types.NodeInfo, gpuCount int)
 	}
 	cudaVisibleDevices := strings.Join(cudaDevices, ",")
 	fmt.Printf("\nCUDA_VISIBLE_DEVICES=%s\n", cudaVisibleDevices)
-	fmt.Printf("Launching: torchrun --nproc_per_node=%d %s\n\n", useGPUs, scriptPath)
+	fmt.Printf("Launching: python3 %s\n\n", scriptPath)
 
 	// Step 5: Launch the workload subprocess
-	cmd := exec.Command("torchrun", "--nproc_per_node="+strconv.Itoa(useGPUs), scriptPath)
+	cmd := exec.Command("python3", scriptPath)
 	cmd.Env = append(os.Environ(), "CUDA_VISIBLE_DEVICES="+cudaVisibleDevices)
 
 	stdout, err := cmd.StdoutPipe()
