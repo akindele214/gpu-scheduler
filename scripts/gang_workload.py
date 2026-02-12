@@ -36,22 +36,18 @@ def main():
     model = models.resnet18(num_classes=10).cuda(local_rank)
     model = DDP(model, device_ids=[local_rank])
 
-    # Data
+    # Data — rank 0 downloads first, then all ranks load
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
+    if rank == 0:
+        datasets.CIFAR10(root="/tmp/cifar10", train=True, download=True)
+    dist.barrier()
     dataset = datasets.CIFAR10(
-        root="/tmp/cifar10", train=True, download=(rank == 0),
+        root="/tmp/cifar10", train=True, download=False,
         transform=transform,
     )
-    # Wait for rank 0 to download
-    dist.barrier()
-    if rank != 0:
-        dataset = datasets.CIFAR10(
-            root="/tmp/cifar10", train=True, download=False,
-            transform=transform,
-        )
 
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, sampler=sampler, num_workers=2)
