@@ -23,7 +23,7 @@ def main():
 
     for i in range(gpu_count):
         name = torch.cuda.get_device_name(i)
-        total = torch.cuda.get_device_properties(i).total_mem / 1e6
+        total = torch.cuda.get_device_properties(i).total_memory / 1e6
         print(f"  GPU {i}: {name}, {total:.0f} MB total", flush=True)
 
     print(f"\nRunning {NUM_ITERS} matmul iterations on {gpu_count} GPUs...\n", flush=True)
