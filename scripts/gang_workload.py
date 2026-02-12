@@ -22,8 +22,16 @@ BATCH_SIZE = 32
 
 
 def main():
+    # Download dataset BEFORE any NCCL ops to avoid timeout
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    rank = int(os.environ.get("RANK", "0"))
+    if rank == 0:
+        print("[rank 0] Downloading CIFAR-10...", flush=True)
+        datasets.CIFAR10(root="/tmp/cifar10", train=True, download=True)
+        print("[rank 0] Download complete.", flush=True)
+
+    # Now init process group (NCCL)
     dist.init_process_group(backend="nccl")
-    local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
 
     rank = dist.get_rank()
@@ -36,14 +44,11 @@ def main():
     model = models.resnet18(num_classes=10).cuda(local_rank)
     model = DDP(model, device_ids=[local_rank])
 
-    # Data — rank 0 downloads first, then all ranks load
+    # Data — already downloaded by rank 0 before NCCL init
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
-    if rank == 0:
-        datasets.CIFAR10(root="/tmp/cifar10", train=True, download=True)
-    dist.barrier()
     dataset = datasets.CIFAR10(
         root="/tmp/cifar10", train=True, download=False,
         transform=transform,
