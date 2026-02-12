@@ -144,6 +144,17 @@ func (m *Manager) RefreshAll() error {
 	}
 	return nil
 }
+func (m *Manager) GetAllocations() map[uuid.UUID][]*Allocation {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[uuid.UUID][]*Allocation, len(m.allocations))
+	for k, v := range m.allocations {
+		result[k] = v
+	}
+	return result
+}
+
 func (m *Manager) Allocate(jobID uuid.UUID, gpuID uuid.UUID, memoryMB int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
