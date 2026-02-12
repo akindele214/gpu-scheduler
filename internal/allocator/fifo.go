@@ -63,30 +63,34 @@ func (f *FIFOScheduler) ScheduleGang(job *types.Job, nodes []types.NodeInfo, gpu
 		requiredMemory = 0
 	}
 	var gpuPlacements []types.GPUPlacement
-	var matchedGPU int
+
 	for _, node := range nodes {
+		if len(node.GPUs) < gpuCount {
+			continue
+		}
+		gpuPlacements = []types.GPUPlacement{}
 		for _, gpu := range node.GPUs {
-			if !gpu.IsHealthy {
+			if !gpu.IsHealthy || gpu.AvailableMemoryMB() < requiredMemory {
 				continue
 			}
-			if gpu.AvailableMemoryMB() >= requiredMemory {
-				gpuPlacements = append(gpuPlacements, types.GPUPlacement{
-					NodeName: node.Name,
-					MemoryMB: requiredMemory,
-					GPUID:    gpu.ID,
-				})
-				matchedGPU += 1
-			}
-			if matchedGPU >= gpuCount {
+
+			gpuPlacements = append(gpuPlacements, types.GPUPlacement{
+				NodeName: node.Name,
+				MemoryMB: requiredMemory,
+				GPUID:    gpu.ID,
+			})
+
+			if len(gpuPlacements) >= gpuCount {
 				break
 			}
 		}
-		if matchedGPU >= gpuCount {
+		if len(gpuPlacements) >= gpuCount {
 			break
 		}
 	}
-	if matchedGPU < gpuCount {
-		return nil, fmt.Errorf("available gpu [%d] less than required GPU count %d", matchedGPU, gpuCount)
+	if len(gpuPlacements) < gpuCount {
+		// return nil, fmt.Errorf("available gpu [%d] less than required GPU count %d", len(gpuPlacements), gpuCount)
+		return nil, fmt.Errorf("no single node has %d GPUs with %dMB available", gpuCount, requiredMemory)
 	}
 	return &types.GangSchedulingResult{
 		JobID:      job.ID,

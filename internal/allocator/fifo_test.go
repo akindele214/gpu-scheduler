@@ -280,32 +280,20 @@ func TestFIFO_ScheduleGang_SkipsUnhealthyGPUs_NotEnough(t *testing.T) {
 	}
 }
 
-func TestFIFO_ScheduleGang_AcrossMultipleNodes(t *testing.T) {
+func TestFIFO_ScheduleGang_AcrossMultipleNodes_Fails(t *testing.T) {
 	f := NewFIFOScheduler()
 	job := makeJob("gang-job", 8000)
 
-	// 1 GPU per node, need 3 GPUs
+	// 1 GPU per node, need 3 GPUs - no single node can satisfy this
 	nodes := []types.NodeInfo{
 		makeNode("node-1", []types.GPU{makeGPUWithNode("node-1", 16000, 0, true)}),
 		makeNode("node-2", []types.GPU{makeGPUWithNode("node-2", 16000, 0, true)}),
 		makeNode("node-3", []types.GPU{makeGPUWithNode("node-3", 16000, 0, true)}),
 	}
 
-	result, err := f.ScheduleGang(job, nodes, 3, types.MemoryPerGPU)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(result.Placements) != 3 {
-		t.Errorf("expected 3 placements, got %d", len(result.Placements))
-	}
-
-	// Verify we got GPUs from all 3 nodes
-	nodesSeen := make(map[string]bool)
-	for _, p := range result.Placements {
-		nodesSeen[p.NodeName] = true
-	}
-	if len(nodesSeen) != 3 {
-		t.Errorf("expected placements across 3 nodes, got %d unique nodes", len(nodesSeen))
+	_, err := f.ScheduleGang(job, nodes, 3, types.MemoryPerGPU)
+	if err == nil {
+		t.Error("expected error when no single node has enough GPUs, got nil")
 	}
 }
 

@@ -130,26 +130,51 @@ func TestAllocate_InsufficientMemory(t *testing.T) {
 	}
 }
 
-func TestAllocate_DuplicateJob(t *testing.T) {
+func TestAllocate_MultipleGPUsPerJob(t *testing.T) {
 	configs := []MockGPUConfig{
+		{TotalMemoryMB: 80000, UsedMemoryMB: 0, IsHealthy: true},
 		{TotalMemoryMB: 80000, UsedMemoryMB: 0, IsHealthy: true},
 	}
 
 	manager := makeTestManager(t, configs)
 	nodes := manager.GetNodes()
-	gpuID := nodes[0].GPUs[0].ID
+	gpu1ID := nodes[0].GPUs[0].ID
+	gpu2ID := nodes[0].GPUs[1].ID
 	jobID := uuid.New()
 
-	// First allocation
-	err := manager.Allocate(jobID, gpuID, 20000)
+	// First GPU allocation
+	err := manager.Allocate(jobID, gpu1ID, 20000)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error on first allocation: %v", err)
 	}
 
-	// Second allocation with same job ID
-	err = manager.Allocate(jobID, gpuID, 10000)
-	if err == nil {
-		t.Error("expected error for duplicate job allocation, got nil")
+	// Second GPU allocation with same job ID (gang scheduling)
+	err = manager.Allocate(jobID, gpu2ID, 20000)
+	if err != nil {
+		t.Fatalf("unexpected error on second allocation: %v", err)
+	}
+
+	// Verify both GPUs have memory allocated
+	nodes = manager.GetNodes()
+	if nodes[0].GPUs[0].UsedMemoryMB != 20000 {
+		t.Errorf("expected GPU 0 to have 20000MB used, got %d", nodes[0].GPUs[0].UsedMemoryMB)
+	}
+	if nodes[0].GPUs[1].UsedMemoryMB != 20000 {
+		t.Errorf("expected GPU 1 to have 20000MB used, got %d", nodes[0].GPUs[1].UsedMemoryMB)
+	}
+
+	// Release should free both GPUs
+	err = manager.Release(jobID)
+	if err != nil {
+		t.Fatalf("unexpected error on release: %v", err)
+	}
+
+	nodes = manager.GetNodes()
+	if nodes[0].GPUs[0].UsedMemoryMB != 0 {
+		t.Errorf("expected GPU 0 to have 0MB used after release, got %d", nodes[0].GPUs[0].UsedMemoryMB)
+	}
+	if nodes[0].GPUs[1].UsedMemoryMB != 0 {
+		t.Errorf("expected GPU 1 to have 0MB used after release, got %d", nodes[0].GPUs[1].UsedMemoryMB)
 	}
 }
 

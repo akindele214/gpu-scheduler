@@ -78,25 +78,57 @@ func (w *Watcher) processQueue() {
 
 func (w *Watcher) schedulePod(pod *corev1.Pod) {
 	nodes := w.gpuManager.GetNodes()
+	gpuCount := GetGPUCountFromPod(pod)
+
 	job := &types.Job{
 		ID:        uuid.New(),
 		Name:      pod.Name,
 		Namespace: pod.Namespace,
 		MemoryMB:  GetGPUMemoryFromPod(pod),
-		GPUCount:  1,
+		GPUCount:  gpuCount,
 		Status:    types.Pending,
 		Workflow:  GetWorkflowFromPod(pod), // optional: check annotation
 		CreatedAt: time.Now(),
 	}
+	var nodeName string
+	if gpuCount > 1 {
+		memoryMode := GetMemoryModeFromPod(pod)
+		result, err := w.strategy.ScheduleGang(job, nodes, gpuCount, memoryMode)
+		if err != nil {
+			log.Printf("Failed to schedule pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			return
+		}
+		if result == nil {
+			log.Printf("No suitable node found for pod %s/%s", pod.Namespace, pod.Name)
+			return
+		}
+		nodeName = result.Placements[0].NodeName
 
-	result, err := w.strategy.Schedule(job, nodes)
-	if err != nil {
-		log.Printf("Failed to schedule pod %s/%s: %v", pod.Namespace, pod.Name, err)
-		return
-	}
-	if result == nil {
-		log.Printf("No suitable node found for pod %s/%s", pod.Namespace, pod.Name)
-		return
+		// Allocate all GPUs for this job
+		for _, placement := range result.Placements {
+			if err := w.gpuManager.Allocate(job.ID, placement.GPUID, placement.MemoryMB); err != nil {
+				log.Printf("Failed to allocate GPU %s for pod %s/%s: %v", placement.GPUID, pod.Namespace, pod.Name, err)
+				// TODO: rollback previous allocations
+				return
+			}
+		}
+	} else {
+		result, err := w.strategy.Schedule(job, nodes)
+		if err != nil {
+			log.Printf("Failed to schedule pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			return
+		}
+		if result == nil {
+			log.Printf("No suitable node found for pod %s/%s", pod.Namespace, pod.Name)
+			return
+		}
+		nodeName = result.NodeName
+
+		// Allocate GPU for this job
+		if err := w.gpuManager.Allocate(job.ID, result.GPUIDs[0], job.MemoryMB); err != nil {
+			log.Printf("Failed to allocate GPU for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			return
+		}
 	}
 	binding := &corev1.Binding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -105,14 +137,14 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 		},
 		Target: corev1.ObjectReference{
 			Kind: "Node",
-			Name: result.NodeName,
+			Name: nodeName,
 		},
 	}
-	err = w.clientSet.CoreV1().Pods(pod.Namespace).Bind(context.TODO(), binding, metav1.CreateOptions{})
+	err := w.clientSet.CoreV1().Pods(pod.Namespace).Bind(context.TODO(), binding, metav1.CreateOptions{})
 	if err != nil {
-		log.Printf("Failed to bind pod %s/%s to node %s: %v", pod.Namespace, pod.Name, result.NodeName, err)
+		log.Printf("Failed to bind pod %s/%s to node %s: %v", pod.Namespace, pod.Name, nodeName, err)
 		return
 	}
-	log.Printf("Successfully scheduled pod %s/%s to node %s", pod.Namespace, pod.Name, result.NodeName)
+	log.Printf("Successfully scheduled pod %s/%s to node %s", pod.Namespace, pod.Name, nodeName)
 
 }

@@ -43,7 +43,6 @@ func (bp *BinPacker) Schedule(job *types.Job, nodes []types.NodeInfo) (*types.Sc
 func (bp *BinPacker) ScheduleGang(job *types.Job, nodes []types.NodeInfo, gpuCount int, memoryMode types.MemoryMode) (*types.GangSchedulingResult, error) {
 	var (
 		requiredMemory int
-		candidates     []candidate
 		err            error
 	)
 	if job == nil {
@@ -58,24 +57,26 @@ func (bp *BinPacker) ScheduleGang(job *types.Job, nodes []types.NodeInfo, gpuCou
 		requiredMemory = 0
 	}
 
-	candidates, err = bp.findCandidates(requiredMemory, nodes)
+	gangCandidates, err := bp.findGangCandidates(gpuCount, requiredMemory, nodes)
 	if err != nil {
 		return nil, err
 	}
-	if len(candidates) < gpuCount {
-		return nil, fmt.Errorf("available gpu [%d] less than required GPU count %d", len(candidates), gpuCount)
-	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].waste < candidates[j].waste
+	sort.Slice(gangCandidates, func(i, j int) bool {
+		return gangCandidates[i].totalWaste < gangCandidates[j].totalWaste
 	})
+
+	bestCandidate := bp.selectGangSchedulerBestFit(gangCandidates)
 	var gpuPlacements []types.GPUPlacement
-	for _, candidate := range candidates[:gpuCount] {
-		gpuPlacements = append(gpuPlacements, types.GPUPlacement{
-			NodeName: candidate.gpu.NodeName,
-			GPUID:    candidate.gpu.ID,
-			MemoryMB: requiredMemory,
-		})
+
+	for _, gpu := range bestCandidate.gpus[:gpuCount] {
+		gpuPlacements = append(gpuPlacements,
+			types.GPUPlacement{
+				NodeName: bestCandidate.nodeName,
+				GPUID:    gpu.ID,
+				MemoryMB: requiredMemory,
+			},
+		)
 	}
 
 	return &types.GangSchedulingResult{
@@ -95,10 +96,25 @@ func (bp *BinPacker) selectBestFit(candidates []candidate) candidate {
 	return bestFit
 }
 
+func (bp *BinPacker) selectGangSchedulerBestFit(gangCandidates []gangCandidate) gangCandidate {
+	bestFit := gangCandidates[0]
+	for _, c := range gangCandidates[1:] {
+		if c.totalWaste < bestFit.totalWaste {
+			bestFit = c
+		}
+	}
+	return bestFit
+}
+
 type candidate struct {
 	node  types.NodeInfo
 	gpu   types.GPU
 	waste int // available memory - job memory
+}
+type gangCandidate struct {
+	nodeName   string
+	gpus       []types.GPU
+	totalWaste int
 }
 
 func (bp *BinPacker) findCandidates(requiredMemory int, nodes []types.NodeInfo) ([]candidate, error) {
@@ -125,4 +141,59 @@ func (bp *BinPacker) findCandidates(requiredMemory int, nodes []types.NodeInfo) 
 	}
 
 	return candidates, nil
+}
+
+func (bp *BinPacker) findGangCandidates(gpuCount int, requiredMemory int, nodes []types.NodeInfo) ([]gangCandidate, error) {
+	returnCandidates := []gangCandidate{}
+
+	for _, node := range nodes {
+		if len(node.GPUs) < gpuCount {
+			continue
+		}
+
+		// S1: Collect ALL eligible GPU for the node
+		type eligibleGPU struct {
+			gpu   types.GPU
+			waste int
+		}
+		eligible := []eligibleGPU{}
+
+		for _, gpu := range node.GPUs {
+			if !gpu.IsHealthy || gpu.AvailableMemoryMB() < requiredMemory {
+				continue
+			}
+			waste := gpu.AvailableMemoryMB() - requiredMemory
+			eligible = append(eligible, eligibleGPU{gpu: gpu, waste: waste})
+		}
+
+		// s2: Check if node has enough eligible GPUs
+		if len(eligible) < gpuCount {
+			continue
+		}
+
+		// s3: Sort by waste (ascending) to get best GPUs first
+		sort.Slice(eligible, func(i, j int) bool {
+			return eligible[i].waste < eligible[j].waste
+		})
+
+		// s4: Take the best N GPUs and sum their waste
+		bestN := eligible[:gpuCount]
+		totalWaste := 0
+		gpus := make([]types.GPU, gpuCount)
+		for i, e := range bestN {
+			gpus[i] = e.gpu
+			totalWaste += e.waste
+		}
+
+		returnCandidates = append(returnCandidates, gangCandidate{
+			nodeName:   node.Name,
+			gpus:       gpus,
+			totalWaste: totalWaste,
+		})
+	}
+
+	if len(returnCandidates) == 0 {
+		return nil, fmt.Errorf("no single node has %d GPUs with %dMB available", gpuCount, requiredMemory)
+	}
+	return returnCandidates, nil
 }

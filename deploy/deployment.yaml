@@ -18,7 +18,7 @@ spec:
       serviceAccountName: gpu-scheduler
       containers:
         - name: gpu-scheduler
-          image: 767397814034.dkr.ecr.us-east-1.amazonaws.com/gpu-scheduler:latest
+          image: 767397814034.dkr.ecr.us-east-1.amazonaws.com/gpu-scheduler:v0.2
           imagePullPolicy: Always
           ports:
             - containerPort: 8888
