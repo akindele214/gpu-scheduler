@@ -12,7 +12,7 @@ import (
 // var discoverer GPUDiscoverer
 type Manager struct {
 	discoverer  GPUDiscoverer
-	nodes       map[string]*types.NodeInfo // node name → info
+	nodes       map[string]*types.NodeInfo  // node name → info
 	allocations map[uuid.UUID][]*Allocation // job ID → allocations (supports multi-GPU)
 	mu          sync.RWMutex
 }
