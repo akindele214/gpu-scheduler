@@ -29,6 +29,10 @@ func (f *FIFOScheduler) Schedule(job *types.Job, nodes []types.NodeInfo) (*types
 			if !gpu.IsHealthy {
 				continue
 			}
+			// Skip fully-used GPUs (count-based allocation)
+			if gpu.TotalMemoryMB > 0 && gpu.AvailableMemoryMB() == 0 {
+				continue
+			}
 			if gpu.AvailableMemoryMB() >= job.MemoryMB {
 				return &types.SchedulingResult{
 					JobID:     job.ID,
@@ -70,7 +74,14 @@ func (f *FIFOScheduler) ScheduleGang(job *types.Job, nodes []types.NodeInfo, gpu
 		}
 		gpuPlacements = []types.GPUPlacement{}
 		for _, gpu := range node.GPUs {
-			if !gpu.IsHealthy || gpu.AvailableMemoryMB() < requiredMemory {
+			if !gpu.IsHealthy {
+				continue
+			}
+			// Skip fully-used GPUs (count-based allocation)
+			if gpu.TotalMemoryMB > 0 && gpu.AvailableMemoryMB() == 0 {
+				continue
+			}
+			if gpu.AvailableMemoryMB() < requiredMemory {
 				continue
 			}
 

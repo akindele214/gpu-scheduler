@@ -125,6 +125,10 @@ func (bp *BinPacker) findCandidates(requiredMemory int, nodes []types.NodeInfo) 
 			if !gpu.IsHealthy {
 				continue
 			}
+			// Skip fully-used GPUs (count-based allocation)
+			if gpu.TotalMemoryMB > 0 && gpu.AvailableMemoryMB() == 0 {
+				continue
+			}
 			if gpu.AvailableMemoryMB() < requiredMemory {
 				continue
 			}
@@ -159,7 +163,14 @@ func (bp *BinPacker) findGangCandidates(gpuCount int, requiredMemory int, nodes 
 		eligible := []eligibleGPU{}
 
 		for _, gpu := range node.GPUs {
-			if !gpu.IsHealthy || gpu.AvailableMemoryMB() < requiredMemory {
+			if !gpu.IsHealthy {
+				continue
+			}
+			// Skip fully-used GPUs (count-based allocation)
+			if gpu.TotalMemoryMB > 0 && gpu.AvailableMemoryMB() == 0 {
+				continue
+			}
+			if gpu.AvailableMemoryMB() < requiredMemory {
 				continue
 			}
 			waste := gpu.AvailableMemoryMB() - requiredMemory
