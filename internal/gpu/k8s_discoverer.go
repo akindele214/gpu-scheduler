@@ -67,6 +67,7 @@ func (k *K8sDiscoverer) Discover() ([]types.GPU, error) {
 		log.Printf("Warning: failed to get GPU usage: %v", err)
 		gpuUsage = make(map[string]int) // Continue with empty map
 	}
+	log.Printf("GPU usage by node: %v", gpuUsage)
 	nodes, err := k.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list nodes: %w", err)
@@ -126,7 +127,7 @@ func (k *K8sDiscoverer) Discover() ([]types.GPU, error) {
 				IsHealthy:          isNodeReady(&node),
 				IsShared:           false,
 			}
-
+			log.Printf("GPU %d on %s: usedCount=%d, i=%d, marking as used=%v", i, node.Name, usedCount, i, i < usedCount)
 			gpus = append(gpus, gpu)
 			k.gpuCache[cacheKey] = gpu
 			gpuIndex++
