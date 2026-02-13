@@ -1,17 +1,19 @@
 #!/bin/bash
 
 # Test GPU scheduling - creates 3 pods to verify scheduler behavior
-# Pod 1: 1 GPU, Pod 2: 2 GPUs, Pod 3: 3 GPUs (should stay Pending)
+# Pod 1: 1 GPU (priority 100), Pod 2: 2 GPUs (priority 90), Pod 3: 3 GPUs (priority 50 - lowest, should stay Pending)
 
 set -e
 kubectl delete pod --all
 
-echo "Creating gpu-test-1 (1 GPU)..."
+echo "Creating gpu-test-1 (1 GPU, priority 100)..."
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
   name: gpu-test-1
+  annotations:
+    gpu-scheduler/priority: "100"
 spec:
   schedulerName: gpu-scheduler
   containers:
@@ -23,12 +25,14 @@ spec:
         nvidia.com/gpu: 1
 EOF
 
-echo "Creating gpu-test-2 (2 GPUs)..."
+echo "Creating gpu-test-2 (2 GPUs, priority 90)..."
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
   name: gpu-test-2
+  annotations:
+    gpu-scheduler/priority: "90"
 spec:
   schedulerName: gpu-scheduler
   containers:
@@ -40,12 +44,14 @@ spec:
         nvidia.com/gpu: 2
 EOF
 
-echo "Creating gpu-overflow (3 GPUs - should stay Pending, only 1 free)..."
+echo "Creating gpu-overflow (3 GPUs, priority 50 - should stay Pending)..."
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
   name: gpu-overflow
+  annotations:
+    gpu-scheduler/priority: "50"
 spec:
   schedulerName: gpu-scheduler
   containers:
