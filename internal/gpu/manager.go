@@ -165,7 +165,12 @@ func (m *Manager) Allocate(jobID uuid.UUID, gpuID uuid.UUID, memoryMB int) error
 				if node.GPUs[i].AvailableMemoryMB() < memoryMB {
 					return fmt.Errorf("insufficient memory")
 				}
-				node.GPUs[i].UsedMemoryMB += memoryMB
+				// Count-based allocation: mark entire GPU as used
+				if memoryMB == 0 {
+					node.GPUs[i].UsedMemoryMB = node.GPUs[i].TotalMemoryMB
+				} else {
+					node.GPUs[i].UsedMemoryMB += memoryMB
+				}
 				m.allocations[jobID] = append(m.allocations[jobID], &Allocation{
 					JobID:    jobID,
 					GPUID:    node.GPUs[i].ID,
