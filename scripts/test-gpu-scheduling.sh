@@ -4,6 +4,7 @@
 # Pod 1: 1 GPU, Pod 2: 2 GPUs, Pod 3: 3 GPUs (should stay Pending)
 
 set -e
+kubectl delete pod --all
 
 echo "Creating gpu-test-1 (1 GPU)..."
 kubectl apply -f - <<EOF
