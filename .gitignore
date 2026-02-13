@@ -25,3 +25,5 @@ go.work.sum
 .env
 .runpod_key
 .runpod_key.pub
+vast-key
+vast-key.pub
