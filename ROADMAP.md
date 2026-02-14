@@ -144,11 +144,42 @@ INFO  Scheduling latency: 12ms
 
 ---
 
-## Phase 0.2: Advanced Scheduling Policies & Workflow Awareness (4–5 days)
+## Phase 0.2: Advanced Scheduling Policies & Workflow Awareness (4–5 days) ✅ COMPLETE
 
 **Goal:** Add backfilling, gang scheduling, and workflow-aware scheduling (build vs. train/inference) to improve cluster utilization and support diverse AI development patterns.
 
-### Tasks
+**Status:** Completed 2026-02-13. Tested on Vast.ai with 4x RTX 4090 GPUs.
+
+### Completed
+
+1. **Workflow Labeling & Routing** ✅
+   - Workflow types via annotation: `gpu-scheduler/workflow: build | train | inference`
+   - Config-based workflow priority mapping
+   - Route jobs to appropriate scheduling policies based on workflow type
+
+2. **Priority-Based Scheduling** ✅
+   - Priority via annotation: `gpu-scheduler/priority: <int>` (higher = scheduled first)
+   - Pods sorted by priority before scheduling
+   - Handles equal-priority pods (FIFO-ish, determined by K8s return order)
+
+3. **Gang Scheduling** ✅
+   - Multi-GPU requests via `nvidia.com/gpu` resource limits
+   - Atomic allocation: all GPUs or none (via `ScheduleGang`)
+   - Correctly stays Pending when insufficient GPUs available
+
+4. **Real GPU Testing** ✅
+   - Validated on k3s cluster with 4x RTX 4090
+   - Fixed over-scheduling bug (in-memory tracking + count-based allocation)
+   - Correct Pending behavior instead of UnexpectedAdmissionError
+
+### Deferred to Future Phases
+
+- **Reservation-based backfill**: Reserve capacity for head-of-queue large jobs. Deferred because priority-based scheduling handles most use cases.
+- **Aging/deadline scheduling** (Phase 0.3+): Jobs gain priority over time to prevent starvation. Requires arrival time tracking, decay curves, deadline annotations.
+- **Separate workflow queues**: Isolate build/train/inference into separate queues. Current priority system suffices.
+- **Utilization metrics**: `backfill_jobs_total`, `gang_scheduling_latency`. Add when backfill is implemented.
+
+### Tasks (Original Plan)
 
 1. **Workflow Labeling & Routing** (`internal/scheduler/workflow.go`)
 
@@ -230,56 +261,123 @@ INFO  Backfill improved utilization: 72% -> 78%
 
 ---
 
-## Phase 0.3: GPU Sharing & Memory Management (5–7 days)
+## Phase 0.3: True GPU-Level Bin-Packing & Sharing (7–10 days)
 
-**Goal:** Enable GPU sharing via MIG/time-slicing and add initial KV cache-aware memory management for inference workloads.
+**Goal:** Implement true GPU-level bin-packing via DaemonSet architecture with direct NVML access and GPU pinning. Then enable GPU sharing via MIG/time-slicing.
 
-### Tasks
+### Part A: True GPU-Level Bin-Packing (Prerequisites)
 
-1. **MIG Support** (`internal/gpu/mig.go`)
+1. **DaemonSet GPU Agent** (`cmd/gpu-agent/main.go`, `internal/agent/`)
 
-   - Detect MIG-enabled GPUs via NVML.
+   - Deploy as DaemonSet on every GPU node.
+   - Direct NVML access for real-time GPU state:
+     - Per-GPU memory (total, used, free)
+     - Per-GPU utilization
+     - GPU UUIDs (stable identifiers)
+     - Temperature, power, health
+   - Expose gRPC or REST API for scheduler to query.
+   - Report to scheduler every 5s (configurable).
+
+2. **GPU Registry** (`internal/gpu/registry.go`)
+
+   - Central registry of all GPUs across cluster.
+   - Maps GPU UUID → node, index, memory, current allocations.
+   - Receives updates from DaemonSet agents.
+   - Replaces K8sDiscoverer's guesswork with real data.
+
+3. **CUDA_VISIBLE_DEVICES Injection** (`internal/scheduler/injector.go`)
+
+   - Mutating webhook OR pod spec modification.
+   - When binding pod to node, inject `CUDA_VISIBLE_DEVICES=0,2` env var.
+   - Pins pod to specific GPU indices chosen by bin-packer.
+   - Coordinates with NVIDIA device plugin (may need to disable its allocation).
+
+4. **True Bin-Packing Allocator** (`internal/allocator/binpack.go`)
+
+   - Now operates on real GPU UUIDs and actual memory.
+   - Best-fit by GPU memory: pick GPU with least waste.
+   - Topology-aware: prefer GPUs on same NVLink/PCIe group for multi-GPU jobs.
+   - Returns specific GPU indices, not just node name.
+
+5. **Allocation Tracking** (`internal/gpu/allocations.go`)
+
+   - Track: `{ pod_uid -> [gpu_uuid, memory_reserved] }`.
+   - Sync with DaemonSet agents for ground truth.
+   - Handle pod termination → release GPU allocation.
+
+### Part B: GPU Sharing (MIG & Time-Slicing)
+
+6. **MIG Support** (`internal/gpu/mig.go`)
+
+   - Detect MIG-enabled GPUs via NVML (A100, H100).
    - Track MIG instances as separate allocatable units.
    - Map MIG profiles to resource names: `nvidia.com/mig-1g.5gb`, `nvidia.com/mig-2g.10gb`.
    - Allocator understands MIG instances vs. full GPUs.
-2. **Time-Slicing** (`internal/gpu/timeslice.go`)
+
+7. **Time-Slicing** (`internal/gpu/timeslice.go`)
 
    - Enable time-slicing via NVIDIA device plugin config (document setup).
    - Track oversubscription ratio per GPU (e.g., 4 pods share 1 GPU).
    - Add config: `sharing.timeslice.enabled: true`, `sharing.timeslice.replicas: 4`.
    - Metrics: `gpu_scheduler_timeslice_contention` (pods waiting per GPU).
-3. **Memory Tracking** (`internal/gpu/memory.go`)
+
+8. **Memory Tracking** (`internal/gpu/memory.go`)
 
    - Track GPU memory at finer granularity: `{ gpu_id -> { total, allocated, fragmented } }`.
    - Fragmentation = memory that can't be allocated due to non-contiguous free blocks.
    - Expose: `GetMemoryState(gpu)`, `CanFitAllocation(gpu, size)`.
-4. **KV Cache Awareness (Initial)** (`internal/allocator/kvcache.go`)
+
+9. **KV Cache Awareness (Initial)** (`internal/allocator/kvcache.go`)
 
    - Add pod annotation: `gpu-scheduler.io/kv-cache-estimate: 4Gi`.
    - Factor KV cache into memory allocation decisions.
    - Prefer placing inference pods on GPUs with contiguous free memory.
    - Log warnings when fragmentation exceeds 30%.
-5. **Sharing Policy Engine** (`internal/allocator/sharing.go`)
 
-   - Decide when to use MIG vs. time-slicing vs. exclusive allocation.
-   - Heuristics:
-     - Training jobs: exclusive GPUs (no sharing).
-     - Inference jobs (small): time-slicing or MIG.
-     - Inference jobs (large KV cache): exclusive or MIG partition.
-   - Add config: `sharing.policy: auto | mig | timeslice | exclusive`.
-6. **Multi-Tenancy Labels** (`pkg/types/types.go`)
+10. **Sharing Policy Engine** (`internal/allocator/sharing.go`)
 
-   - Add namespace-based isolation: pods in different namespaces don't share GPUs by default.
-   - Annotation override: `gpu-scheduler.io/allow-sharing: true`.
-7. **Metrics** (`internal/metrics/prometheus.go`)
+    - Decide when to use MIG vs. time-slicing vs. exclusive allocation.
+    - Heuristics:
+      - Training jobs: exclusive GPUs (no sharing).
+      - Inference jobs (small): time-slicing or MIG.
+      - Inference jobs (large KV cache): exclusive or MIG partition.
+    - Add config: `sharing.policy: auto | mig | timeslice | exclusive`.
 
-   - `gpu_scheduler_memory_fragmentation_ratio` (per GPU)
-   - `gpu_scheduler_mig_instances_available` (per node)
-   - `gpu_scheduler_shared_gpu_pod_count` (per GPU)
+11. **Multi-Tenancy Labels** (`pkg/types/types.go`)
+
+    - Add namespace-based isolation: pods in different namespaces don't share GPUs by default.
+    - Annotation override: `gpu-scheduler.io/allow-sharing: true`.
+
+12. **Metrics** (`internal/metrics/prometheus.go`)
+
+    - `gpu_scheduler_memory_fragmentation_ratio` (per GPU)
+    - `gpu_scheduler_mig_instances_available` (per node)
+    - `gpu_scheduler_shared_gpu_pod_count` (per GPU)
+    - `gpu_scheduler_gpu_memory_used_bytes` (per GPU, from NVML)
+    - `gpu_scheduler_gpu_utilization_percent` (per GPU, from NVML)
 
 ### Deliverable
 
 ```bash
+# DaemonSet agent running
+$ kubectl get ds -n gpu-scheduler
+NAME        DESIRED   CURRENT   READY
+gpu-agent   3         3         3
+
+# Scheduler sees real GPU state
+$ curl localhost:8080/api/gpus
+[
+  {"uuid": "GPU-abc123", "node": "node-1", "index": 0, "memory_total": 81920, "memory_used": 24000},
+  {"uuid": "GPU-def456", "node": "node-1", "index": 1, "memory_total": 81920, "memory_used": 0},
+  ...
+]
+
+# True bin-packing with GPU pinning
+$ kubectl apply -f examples/training-4gpu.yaml
+INFO  Bin-packing: node-1 GPUs [0,1,2,3] have 40GB free each
+INFO  Allocated pod training-4gpu to node-1, GPUs: [0,1,2,3]
+INFO  Injected CUDA_VISIBLE_DEVICES=0,1,2,3
+
 # MIG allocation
 $ kubectl apply -f examples/inference-small.yaml
 INFO  Pod inference-small requests: nvidia.com/mig-1g.5gb
