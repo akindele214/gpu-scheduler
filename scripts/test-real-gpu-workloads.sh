@@ -12,7 +12,7 @@ sleep 3
 echo ""
 echo "=== Creating GPU workload pods ==="
 
-# Pod 1: PyTorch ResNet inference (~500MB GPU memory)
+# Pod 1: PyTorch inference (~512MB GPU memory)
 echo "Creating pytorch-inference (1 GPU, priority 100)..."
 kubectl apply -f - <<'EOF'
 apiVersion: v1
@@ -36,10 +36,14 @@ spec:
         print(f'GPU: {torch.cuda.get_device_name(0)}')
         t = torch.randn(1024, 1024, 128).cuda()
         print(f'GPU Memory: {torch.cuda.memory_allocated()/1024**2:.0f} MB')
+        i = 0
         while True:
-            t = t @ t[:128, :].T
-            print(f'Working... {torch.cuda.memory_allocated()/1024**2:.0f} MB')
-            time.sleep(5)
+            # Simple matmul that doesn't crash
+            result = torch.mm(t.view(1024, -1)[:512, :512], t.view(1024, -1)[:512, :512])
+            i += 1
+            if i % 10 == 0:
+                print(f'Iteration {i}, GPU mem: {torch.cuda.memory_allocated()/1024**2:.0f} MB')
+            time.sleep(1)
     resources:
       limits:
         nvidia.com/gpu: 1
@@ -77,10 +81,14 @@ spec:
 
         print(f'Final GPU Memory: {torch.cuda.memory_allocated()/1024**3:.1f} GB')
 
-        # Keep alive
+        # Keep alive with simple operations
+        i = 0
         while True:
-            # Do some work to keep GPU active
-            result = tensors[0] @ tensors[1].T[:1024, :]
+            # Simple sum to keep GPU active without dimension errors
+            _ = tensors[0].sum() + tensors[1].sum()
+            i += 1
+            if i % 6 == 0:
+                print(f'Iteration {i}, GPU mem: {torch.cuda.memory_allocated()/1024**3:.1f} GB')
             time.sleep(10)
     resources:
       limits:
@@ -122,11 +130,15 @@ spec:
                 print(f'GPU {gpu_id}: {torch.cuda.memory_allocated(gpu_id)/1024**3:.1f} GB')
 
         print('Training simulation running...')
+        i = 0
         while True:
+            # Simple operations to keep GPUs active
             for gpu_id in range(gpu_count):
                 with torch.cuda.device(gpu_id):
-                    # Simulate training step
-                    result = tensors[gpu_id][0] @ tensors[gpu_id][1].T[:1024, :]
+                    _ = tensors[gpu_id][0].sum() + tensors[gpu_id][1].sum()
+            i += 1
+            if i % 12 == 0:
+                print(f'Iteration {i}, training active on {gpu_count} GPUs')
             time.sleep(5)
     resources:
       limits:
