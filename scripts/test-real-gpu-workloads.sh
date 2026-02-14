@@ -21,35 +21,25 @@ metadata:
   name: pytorch-inference
   annotations:
     gpu-scheduler/priority: "100"
-    gpu-scheduler/workflow: "inference"
 spec:
   schedulerName: gpu-scheduler
   restartPolicy: Never
   containers:
   - name: pytorch
-    image: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
-    command: ["/bin/bash", "-c"]
+    image: nvcr.io/nvidia/pytorch:24.01-py3
+    command: ["python", "-c"]
     args:
       - |
-        pip install torchvision -q
-        python -c "
         import torch
-        import torchvision.models as models
         import time
-
-        print('Loading ResNet50 to GPU...')
-        model = models.resnet50(weights=None).cuda()
-        model.eval()
-        print(f'Model loaded. GPU Memory: {torch.cuda.memory_allocated()/1024**2:.0f} MB')
-
-        # Run inference loop
+        print(f'CUDA available: {torch.cuda.is_available()}')
+        print(f'GPU: {torch.cuda.get_device_name(0)}')
+        t = torch.randn(1024, 1024, 128).cuda()
+        print(f'GPU Memory: {torch.cuda.memory_allocated()/1024**2:.0f} MB')
         while True:
-            x = torch.randn(32, 3, 224, 224).cuda()
-            with torch.no_grad():
-                out = model(x)
-            print(f'Inference batch done. GPU mem: {torch.cuda.memory_allocated()/1024**2:.0f} MB, max: {torch.cuda.max_memory_allocated()/1024**2:.0f} MB')
+            t = t @ t[:128, :].T
+            print(f'Working... {torch.cuda.memory_allocated()/1024**2:.0f} MB')
             time.sleep(5)
-        "
     resources:
       limits:
         nvidia.com/gpu: 1
