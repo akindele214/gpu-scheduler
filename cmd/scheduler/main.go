@@ -78,7 +78,7 @@ func NewScheduler() (*Scheduler, error) {
 		if !ok || clientset == nil {
 			return nil, fmt.Errorf("standalone mode requires a valid Kubernetes client")
 		}
-		discoverer, err = gpu.NewK8sDiscoverer(clientset)
+		discoverer, err = gpu.NewK8sDiscoverer(clientset, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create K8s discoverer: %w", err)
 		}
@@ -124,6 +124,7 @@ func NewScheduler() (*Scheduler, error) {
 			strategy, // Pass the BinPacker
 			cfg.Scheduler.Name,
 			cfg.GPU.PollIntervalSeconds,
+			cfg.Workflows,
 		)
 		log.Println("Running in STANDALONE mode")
 

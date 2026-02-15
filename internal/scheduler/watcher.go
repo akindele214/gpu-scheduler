@@ -3,9 +3,11 @@ package scheduler
 import (
 	"context"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/akindele214/gpu-scheduler/internal/allocator"
+	"github.com/akindele214/gpu-scheduler/internal/config"
 	"github.com/akindele214/gpu-scheduler/internal/gpu"
 	"github.com/akindele214/gpu-scheduler/pkg/types"
 	"github.com/google/uuid"
@@ -20,15 +22,17 @@ type Watcher struct {
 	strategy      allocator.SchedulingStrategy // Interface, not concrete type
 	schedulerName string
 	pollInterval  int
+	workflowCfg   config.WorkflowConfig
 }
 
-func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, allocator allocator.SchedulingStrategy, schedulerName string, pollInterval int) *Watcher {
+func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, allocator allocator.SchedulingStrategy, schedulerName string, pollInterval int, workflowCfg config.WorkflowConfig) *Watcher {
 	return &Watcher{
 		clientSet:     client,
 		gpuManager:    gpuManager,
 		strategy:      allocator,
 		schedulerName: schedulerName,
 		pollInterval:  pollInterval,
+		workflowCfg:   workflowCfg,
 	}
 }
 
@@ -50,36 +54,96 @@ func (w *Watcher) processQueue() {
 		return
 	}
 
+	var pendingPods []corev1.Pod
 	for _, pod := range pods.Items {
 		if pod.Spec.SchedulerName == w.schedulerName &&
 			pod.Status.Phase == corev1.PodPending &&
 			pod.Spec.NodeName == "" {
-			w.schedulePod(&pod)
+			pendingPods = append(pendingPods, pod)
 		}
+	}
+
+	if len(pendingPods) == 0 {
+		return
+	}
+	type podWithPriority struct {
+		pod      *corev1.Pod
+		priority int
+		index    int
+	}
+	pendingWithPriority := make([]podWithPriority, len(pendingPods))
+	for i, pod := range pendingPods {
+		pendingWithPriority[i] = podWithPriority{
+			pod:      &pod,
+			priority: GetPriorityFromPod(&pod, w.workflowCfg),
+			index:    i,
+		}
+	}
+	sort.Slice(pendingWithPriority, func(i, j int) bool {
+		if pendingWithPriority[i].priority == pendingWithPriority[j].priority {
+			// Stable tie-breaker: preserve original order
+			return pendingWithPriority[i].index < pendingWithPriority[j].index
+		}
+		return pendingWithPriority[i].priority > pendingWithPriority[j].priority
+	})
+	for _, item := range pendingWithPriority {
+		w.schedulePod(item.pod)
 	}
 }
 
 func (w *Watcher) schedulePod(pod *corev1.Pod) {
 	nodes := w.gpuManager.GetNodes()
+	gpuCount := GetGPUCountFromPod(pod)
+
 	job := &types.Job{
 		ID:        uuid.New(),
 		Name:      pod.Name,
 		Namespace: pod.Namespace,
 		MemoryMB:  GetGPUMemoryFromPod(pod),
-		GPUCount:  1,
+		GPUCount:  gpuCount,
 		Status:    types.Pending,
 		Workflow:  GetWorkflowFromPod(pod), // optional: check annotation
 		CreatedAt: time.Now(),
 	}
+	var nodeName string
+	if gpuCount > 1 {
+		memoryMode := GetMemoryModeFromPod(pod)
+		result, err := w.strategy.ScheduleGang(job, nodes, gpuCount, memoryMode)
+		if err != nil {
+			log.Printf("Failed to schedule pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			return
+		}
+		if result == nil {
+			log.Printf("No suitable node found for pod %s/%s", pod.Namespace, pod.Name)
+			return
+		}
+		nodeName = result.Placements[0].NodeName
 
-	result, err := w.strategy.Schedule(job, nodes)
-	if err != nil {
-		log.Printf("Failed to schedule pod %s/%s: %v", pod.Namespace, pod.Name, err)
-		return
-	}
-	if result == nil {
-		log.Printf("No suitable node found for pod %s/%s", pod.Namespace, pod.Name)
-		return
+		// Allocate all GPUs for this job
+		for _, placement := range result.Placements {
+			if err := w.gpuManager.Allocate(job.ID, placement.GPUID, placement.MemoryMB); err != nil {
+				log.Printf("Failed to allocate GPU %s for pod %s/%s: %v", placement.GPUID, pod.Namespace, pod.Name, err)
+				// TODO: rollback previous allocations
+				return
+			}
+		}
+	} else {
+		result, err := w.strategy.Schedule(job, nodes)
+		if err != nil {
+			log.Printf("Failed to schedule pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			return
+		}
+		if result == nil {
+			log.Printf("No suitable node found for pod %s/%s", pod.Namespace, pod.Name)
+			return
+		}
+		nodeName = result.NodeName
+
+		// Allocate GPU for this job
+		if err := w.gpuManager.Allocate(job.ID, result.GPUIDs[0], job.MemoryMB); err != nil {
+			log.Printf("Failed to allocate GPU for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			return
+		}
 	}
 	binding := &corev1.Binding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -88,14 +152,14 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 		},
 		Target: corev1.ObjectReference{
 			Kind: "Node",
-			Name: result.NodeName,
+			Name: nodeName,
 		},
 	}
-	err = w.clientSet.CoreV1().Pods(pod.Namespace).Bind(context.TODO(), binding, metav1.CreateOptions{})
+	err := w.clientSet.CoreV1().Pods(pod.Namespace).Bind(context.TODO(), binding, metav1.CreateOptions{})
 	if err != nil {
-		log.Printf("Failed to bind pod %s/%s to node %s: %v", pod.Namespace, pod.Name, result.NodeName, err)
+		log.Printf("Failed to bind pod %s/%s to node %s: %v", pod.Namespace, pod.Name, nodeName, err)
 		return
 	}
-	log.Printf("Successfully scheduled pod %s/%s to node %s", pod.Namespace, pod.Name, result.NodeName)
+	log.Printf("Successfully scheduled pod %s/%s to node %s", pod.Namespace, pod.Name, nodeName)
 
 }

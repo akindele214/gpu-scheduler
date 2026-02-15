@@ -12,8 +12,8 @@ import (
 // var discoverer GPUDiscoverer
 type Manager struct {
 	discoverer  GPUDiscoverer
-	nodes       map[string]*types.NodeInfo // node name → info
-	allocations map[uuid.UUID]*Allocation  // job ID → allocation
+	nodes       map[string]*types.NodeInfo  // node name → info
+	allocations map[uuid.UUID][]*Allocation // job ID → allocations (supports multi-GPU)
 	mu          sync.RWMutex
 }
 
@@ -73,7 +73,7 @@ func NewManager(discoverer GPUDiscoverer, nodeName string) (*Manager, error) {
 
 	return &Manager{
 		discoverer:  discoverer,
-		allocations: make(map[uuid.UUID]*Allocation),
+		allocations: make(map[uuid.UUID][]*Allocation),
 		nodes:       nodes,
 	}, nil
 }
@@ -107,22 +107,23 @@ func (m *Manager) Release(jobID uuid.UUID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	allocation, exists := m.allocations[jobID]
+	allocations, exists := m.allocations[jobID]
 	if !exists {
 		return fmt.Errorf("no allocation found for job %s", jobID)
 	}
 
-	// Find GPU and release memory
-	for _, node := range m.nodes {
-		for i := range node.GPUs {
-			if node.GPUs[i].ID == allocation.GPUID {
-				node.GPUs[i].UsedMemoryMB -= allocation.MemoryMB
-				delete(m.allocations, jobID)
-				return nil
+	// Release memory for all GPUs allocated to this job
+	for _, allocation := range allocations {
+		for _, node := range m.nodes {
+			for i := range node.GPUs {
+				if node.GPUs[i].ID == allocation.GPUID {
+					node.GPUs[i].UsedMemoryMB -= allocation.MemoryMB
+				}
 			}
 		}
 	}
-	return fmt.Errorf("GPU %s not found for release", allocation.GPUID)
+	delete(m.allocations, jobID)
+	return nil
 }
 
 func (m *Manager) RefreshAll() error {
@@ -143,14 +144,20 @@ func (m *Manager) RefreshAll() error {
 	}
 	return nil
 }
+func (m *Manager) GetAllocations() map[uuid.UUID][]*Allocation {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[uuid.UUID][]*Allocation, len(m.allocations))
+	for k, v := range m.allocations {
+		result[k] = v
+	}
+	return result
+}
+
 func (m *Manager) Allocate(jobID uuid.UUID, gpuID uuid.UUID, memoryMB int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, exists := m.allocations[jobID]
-
-	if exists {
-		return fmt.Errorf("job already allocated")
-	}
 
 	for _, node := range m.nodes {
 		for i := range node.GPUs {
@@ -158,13 +165,18 @@ func (m *Manager) Allocate(jobID uuid.UUID, gpuID uuid.UUID, memoryMB int) error
 				if node.GPUs[i].AvailableMemoryMB() < memoryMB {
 					return fmt.Errorf("insufficient memory")
 				}
-				node.GPUs[i].UsedMemoryMB += memoryMB
-				m.allocations[jobID] = &Allocation{
+				// Count-based allocation: mark entire GPU as used
+				if memoryMB == 0 {
+					node.GPUs[i].UsedMemoryMB = node.GPUs[i].TotalMemoryMB
+				} else {
+					node.GPUs[i].UsedMemoryMB += memoryMB
+				}
+				m.allocations[jobID] = append(m.allocations[jobID], &Allocation{
 					JobID:    jobID,
 					GPUID:    node.GPUs[i].ID,
 					NodeName: node.Name,
 					MemoryMB: memoryMB,
-				}
+				})
 				return nil
 			}
 		}

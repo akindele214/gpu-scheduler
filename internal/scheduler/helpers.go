@@ -3,6 +3,7 @@ package scheduler
 import (
 	"strconv"
 
+	"github.com/akindele214/gpu-scheduler/internal/config"
 	"github.com/akindele214/gpu-scheduler/pkg/types"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -32,11 +33,63 @@ func GetWorkflowFromPod(pod *corev1.Pod) types.WorkflowType {
 		switch value {
 		case "build":
 			return types.Build
-		case "train":
-			return types.Train
+		case "training":
+			return types.Training
 		case "inference":
 			return types.Inference
 		}
 	}
 	return types.Inference
+}
+
+func GetPriorityFromPod(pod *corev1.Pod, workflowCfg config.WorkflowConfig) int {
+	value, exists := pod.Annotations["gpu-scheduler/priority"]
+	if exists {
+		priority, err := strconv.Atoi(value)
+		if err == nil {
+			return priority
+		}
+	}
+	workFlowName := GetWorkflowFromPod(pod)
+	if workFlowName != "" {
+		for _, wf := range workflowCfg.Types {
+			if wf.Name == string(workFlowName) {
+				return wf.Priority
+			}
+		}
+	}
+	return workflowCfg.DefaultPriority
+}
+
+func GetGPUCountFromPod(pod *corev1.Pod) int {
+	value, exists := pod.Annotations["gpu-scheduler/gpu-count"]
+	if exists {
+		count, err := strconv.Atoi(value)
+		if err == nil && count > 0 {
+			return count
+		}
+	}
+
+	for _, container := range pod.Spec.Containers {
+		if quantity, exists := container.Resources.Limits["nvidia.com/gpu"]; exists {
+			return int(quantity.Value())
+		}
+	}
+
+	return 1
+}
+
+func GetMemoryModeFromPod(pod *corev1.Pod) types.MemoryMode {
+	value, exists := pod.Annotations["gpu-scheduler/memory-mode"]
+	if exists {
+		switch value {
+		case "total":
+			return types.MemoryTotal
+		case "none":
+			return types.MemoryNone
+		case "per-gpu":
+			return types.MemoryPerGPU
+		}
+	}
+	return types.MemoryPerGPU
 }

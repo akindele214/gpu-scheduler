@@ -49,6 +49,7 @@ For clusters where you control kube-scheduler configuration (kubeadm, k3s, RKE).
 ```
 
 **How it works:**
+
 1. kube-scheduler receives a pod
 2. Calls our extender's `/filter` endpoint with candidate nodes
 3. Extender filters nodes without sufficient GPU memory
@@ -56,6 +57,7 @@ For clusters where you control kube-scheduler configuration (kubeadm, k3s, RKE).
 5. kube-scheduler binds pod to highest-ranked node
 
 **Config:**
+
 ```yaml
 scheduler:
   mode: "extender"
@@ -80,6 +82,7 @@ For EKS, GKE, AKS where you cannot modify kube-scheduler.
 ```
 
 **How it works:**
+
 1. Watcher polls K8s API every N seconds
 2. Finds pods with `schedulerName: gpu-scheduler` in Pending state
 3. Queries GPU nodes via K8sDiscoverer
@@ -87,6 +90,7 @@ For EKS, GKE, AKS where you cannot modify kube-scheduler.
 5. Binds pod directly to selected node
 
 **Config:**
+
 ```yaml
 scheduler:
   mode: "standalone"
@@ -113,6 +117,7 @@ type Config struct {
 Central state manager for GPU resources across all nodes.
 
 **Responsibilities:**
+
 - Maintains map of nodes → GPU info
 - Tracks allocations (job → GPU mapping)
 - Refreshes GPU state periodically
@@ -130,11 +135,11 @@ type Manager struct {
 
 Interface for discovering GPUs in different environments:
 
-| Discoverer | Use Case | How it works |
-|------------|----------|--------------|
-| `K8sDiscoverer` | EKS, GKE, AKS | Queries node resources for `nvidia.com/gpu` |
-| `NVMLDiscoverer` | Bare metal | Uses NVIDIA NVML library directly |
-| `MockDiscoverer` | Testing | Returns fake GPU data |
+| Discoverer         | Use Case      | How it works                                  |
+| ------------------ | ------------- | --------------------------------------------- |
+| `K8sDiscoverer`  | EKS, GKE, AKS | Queries node resources for `nvidia.com/gpu` |
+| `NVMLDiscoverer` | Bare metal    | Uses NVIDIA NVML library directly             |
+| `MockDiscoverer` | Testing       | Returns fake GPU data                         |
 
 ```go
 type GPUDiscoverer interface {
@@ -155,6 +160,7 @@ type SchedulingStrategy interface {
 ```
 
 **BinPacker** - Best-fit algorithm that minimizes wasted GPU memory:
+
 ```
 Job needs 4GB
 Node A: 16GB free → waste = 12GB
@@ -163,6 +169,7 @@ Node C: 4GB free  → waste = 0GB  ← Selected (exact fit preferred)
 ```
 
 **FIFO** - First available node with sufficient resources:
+
 ```
 Job needs 4GB
 Node A: 16GB free ← Selected (first match)
@@ -175,6 +182,7 @@ Node C: 4GB free
 HTTP server implementing the Kubernetes scheduler extender protocol.
 
 **Endpoints:**
+
 - `POST /filter` - Remove nodes without sufficient GPU memory
 - `POST /prioritize` - Rank nodes by bin-packing score
 - `GET /healthz` - Health check
@@ -194,6 +202,7 @@ type Watcher struct {
 ```
 
 **Loop:**
+
 ```go
 func (w *Watcher) Run() {
     ticker := time.NewTicker(pollInterval)
@@ -206,6 +215,7 @@ func (w *Watcher) Run() {
 ## Data Types (`pkg/types/`)
 
 ### Job
+
 ```go
 type Job struct {
     ID        uuid.UUID
@@ -219,6 +229,7 @@ type Job struct {
 ```
 
 ### GPU
+
 ```go
 type GPU struct {
     ID                 uuid.UUID
@@ -232,6 +243,7 @@ type GPU struct {
 ```
 
 ### NodeInfo
+
 ```go
 type NodeInfo struct {
     Name          string
@@ -295,11 +307,13 @@ gpu-scheduler/
 ## Deployment
 
 ### Prerequisites
+
 - Kubernetes cluster with GPU nodes
 - NVIDIA device plugin installed (`nvidia.com/gpu` resource visible)
 - For standalone mode: RBAC permissions to list pods and create bindings
 
 ### Quick Deploy
+
 ```bash
 # Build and push image
 docker build --platform linux/amd64 -t your-registry/gpu-scheduler:latest .
@@ -310,7 +324,9 @@ kubectl apply -f deploy/
 ```
 
 ### Configuration
+
 Edit `deploy/configmap.yaml`:
+
 ```yaml
 scheduler:
   mode: "standalone"      # or "extender"

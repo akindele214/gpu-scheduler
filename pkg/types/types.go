@@ -9,11 +9,18 @@ import (
 type JobStatus string
 type JobPriority string
 type WorkflowType string
+type MemoryMode string
+
+const (
+	MemoryPerGPU MemoryMode = "per-gpu" // Each GPU needs exactly this much
+	MemoryTotal  MemoryMode = "total"   // Distribute across GPUs
+	MemoryNone   MemoryMode = "none"    // No memory requirement, just GPU count
+)
 
 const (
 	// WorkflowType
 	Build     WorkflowType = "build"
-	Train     WorkflowType = "train"
+	Training  WorkflowType = "training"
 	Inference WorkflowType = "inference"
 
 	// JobStatus
@@ -28,6 +35,18 @@ const (
 	PriorityNormal JobPriority = "normal"
 	PriorityHigh   JobPriority = "high"
 )
+
+type GangSchedulingResult struct {
+	JobID      uuid.UUID
+	Placements []GPUPlacement
+	Timestamp  time.Time
+}
+
+type GPUPlacement struct {
+	NodeName string
+	GPUID    uuid.UUID
+	MemoryMB int // Memory allocated on this GPU
+}
 
 type Job struct {
 	ID          uuid.UUID
