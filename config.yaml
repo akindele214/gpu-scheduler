@@ -8,7 +8,7 @@ queue:
   defaultPolicy: "fifo"
 gpu:
   pollIntervalSeconds: 5
-  mockMode: false
+  mockMode: true
 kubernetes:
   kubeconfig: "/etc/rancher/k3s/k3s.yaml"
   namespace: "default"

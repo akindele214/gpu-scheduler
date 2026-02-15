@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/akindele214/gpu-scheduler/internal/agent"
 	"github.com/akindele214/gpu-scheduler/internal/allocator"
 	"github.com/akindele214/gpu-scheduler/internal/config"
 	"github.com/akindele214/gpu-scheduler/internal/gpu"
@@ -47,6 +49,7 @@ type Scheduler struct {
 	manager   *gpu.Manager
 	allocator *allocator.Allocator
 	extender  *scheduler.Extender
+	registry  *gpu.Registry
 	watcher   *scheduler.Watcher
 	server    *http.Server
 	stopCh    chan struct{}
@@ -96,13 +99,14 @@ func NewScheduler() (*Scheduler, error) {
 		return nil, err
 	}
 
-	// 5. Create Allocator
+	// 5. Create Allocator and registry
 	alloc := allocator.NewAllocator(manager)
-
+	registry := gpu.NewRegistry()
 	s := &Scheduler{
 		config:    cfg,
 		manager:   manager,
 		allocator: alloc,
+		registry:  registry,
 		stopCh:    make(chan struct{}),
 	}
 	// 6. Create Extender or Watcher based on mode
@@ -127,6 +131,16 @@ func NewScheduler() (*Scheduler, error) {
 			cfg.Workflows,
 		)
 		log.Println("Running in STANDALONE mode")
+		mux := http.NewServeMux()
+		s.registerGPUReportEndpoint(mux)
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		s.server = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.Scheduler.Port),
+			Handler: mux,
+		}
 
 	} else {
 		// Extender mode
@@ -135,6 +149,7 @@ func NewScheduler() (*Scheduler, error) {
 		// Create HTTP server
 		mux := http.NewServeMux()
 		ext.RegisterRoutes(mux)
+		s.registerGPUReportEndpoint(mux)
 
 		s.server = &http.Server{
 			Addr:    fmt.Sprintf(":%d", cfg.Scheduler.Port),
@@ -153,6 +168,12 @@ func (s *Scheduler) Run() error {
 
 	if s.config.Scheduler.Mode == "standalone" {
 		log.Println("Starting GPU scheduler in STANDALONE mode (watcher)")
+		go func() {
+			log.Printf("Starting HTTP server on port %d for GPU agent reports", s.config.Scheduler.Port)
+			if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("HTTP server error: %v", err)
+			}
+		}()
 		s.watcher.Run() // This blocks
 		return nil
 	}
@@ -190,6 +211,26 @@ func (s *Scheduler) refreshLoop() {
 			return
 		}
 	}
+}
+func (s *Scheduler) registerGPUReportEndpoint(mux *http.ServeMux) {
+	mux.HandleFunc("/api/v1/gpu-report", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var report agent.GPUReport
+		if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+			http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		s.registry.UpdateFromReport(&report)
+		log.Printf("Received GPU report from node %s: %d GPUs", report.NodeName, len(report.GPUs))
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	})
 }
 func buildKubeClient() (kubernetes.Interface, error) {
 	// Try in-cluster config first (when running in K8s)
