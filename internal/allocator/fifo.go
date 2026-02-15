@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/akindele214/gpu-scheduler/pkg/types"
-	"github.com/google/uuid"
 )
 
 type FIFOScheduler struct{}
@@ -37,7 +36,7 @@ func (f *FIFOScheduler) Schedule(job *types.Job, nodes []types.NodeInfo) (*types
 				return &types.SchedulingResult{
 					JobID:     job.ID,
 					NodeName:  node.Name,
-					GPUIDs:    []uuid.UUID{gpu.ID},
+					GPUIDs:    []string{gpu.ID},
 					Success:   true,
 					Timestamp: time.Now(),
 				}, nil

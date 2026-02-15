@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/akindele214/gpu-scheduler/pkg/types"
-	"github.com/google/uuid"
 )
 
 type BinPacker struct {
@@ -34,7 +33,7 @@ func (bp *BinPacker) Schedule(job *types.Job, nodes []types.NodeInfo) (*types.Sc
 	return &types.SchedulingResult{
 		JobID:     job.ID,
 		NodeName:  bestcandidate.node.Name,
-		GPUIDs:    []uuid.UUID{bestcandidate.gpu.ID},
+		GPUIDs:    []string{bestcandidate.gpu.ID},
 		Success:   true,
 		Timestamp: time.Now(),
 	}, nil

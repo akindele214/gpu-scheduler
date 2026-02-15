@@ -84,7 +84,7 @@ func TestGetGPU_NotFound(t *testing.T) {
 	}
 
 	manager := makeTestManager(t, configs)
-	fakeID := uuid.New()
+	fakeID := "GPU-nonexistent-fake-id"
 
 	_, err := manager.GetGPU(fakeID)
 	if err == nil {
@@ -185,7 +185,7 @@ func TestAllocate_GPUNotFound(t *testing.T) {
 
 	manager := makeTestManager(t, configs)
 	jobID := uuid.New()
-	fakeGPUID := uuid.New()
+	fakeGPUID := "GPU-nonexistent-fake-id"
 
 	err := manager.Allocate(jobID, fakeGPUID, 20000)
 	if err == nil {

@@ -99,9 +99,9 @@ func NewScheduler() (*Scheduler, error) {
 		return nil, err
 	}
 
-	// 5. Create Allocator and registry
-	alloc := allocator.NewAllocator(manager)
+	// 5. Create Registry and Allocator
 	registry := gpu.NewRegistry()
+	alloc := allocator.NewAllocator(manager, registry)
 	s := &Scheduler{
 		config:    cfg,
 		manager:   manager,

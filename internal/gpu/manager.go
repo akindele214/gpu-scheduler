@@ -19,7 +19,7 @@ type Manager struct {
 
 type Allocation struct {
 	JobID    uuid.UUID
-	GPUID    uuid.UUID
+	GPUID    string // NVIDIA UUID format
 	NodeName string
 	MemoryMB int
 }
@@ -89,7 +89,7 @@ func (m *Manager) GetNodes() []types.NodeInfo {
 	return nodes
 }
 
-func (m *Manager) GetGPU(gpuID uuid.UUID) (*types.GPU, error) {
+func (m *Manager) GetGPU(gpuID string) (*types.GPU, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -155,7 +155,7 @@ func (m *Manager) GetAllocations() map[uuid.UUID][]*Allocation {
 	return result
 }
 
-func (m *Manager) Allocate(jobID uuid.UUID, gpuID uuid.UUID, memoryMB int) error {
+func (m *Manager) Allocate(jobID uuid.UUID, gpuID string, memoryMB int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

@@ -10,7 +10,7 @@ import (
 // Helper to create a test GPU
 func makeGPU(totalMB, usedMB int, healthy bool) types.GPU {
 	return types.GPU{
-		ID:            uuid.New(),
+		ID:            "GPU-" + uuid.New().String(), // NVIDIA format
 		TotalMemoryMB: totalMB,
 		UsedMemoryMB:  usedMB,
 		IsHealthy:     healthy,
@@ -20,7 +20,7 @@ func makeGPU(totalMB, usedMB int, healthy bool) types.GPU {
 // Helper to create a test GPU with node name (for gang scheduling tests)
 func makeGPUWithNode(nodeName string, totalMB, usedMB int, healthy bool) types.GPU {
 	return types.GPU{
-		ID:            uuid.New(),
+		ID:            "GPU-" + uuid.New().String(), // NVIDIA format
 		NodeName:      nodeName,
 		TotalMemoryMB: totalMB,
 		UsedMemoryMB:  usedMB,
