@@ -66,13 +66,28 @@ func (w *Watcher) processQueue() {
 	if len(pendingPods) == 0 {
 		return
 	}
-	sort.Slice(pendingPods, func(i, j int) bool {
-		priorityI := GetPriorityFromPod(&pendingPods[i], w.workflowCfg)
-		priorityJ := GetPriorityFromPod(&pendingPods[j], w.workflowCfg)
-		return priorityI > priorityJ
+	type podWithPriority struct {
+		pod      *corev1.Pod
+		priority int
+		index    int
+	}
+	pendingWithPriority := make([]podWithPriority, len(pendingPods))
+	for i, pod := range pendingPods {
+		pendingWithPriority[i] = podWithPriority{
+			pod:      &pod,
+			priority: GetPriorityFromPod(&pod, w.workflowCfg),
+			index:    i,
+		}
+	}
+	sort.Slice(pendingWithPriority, func(i, j int) bool {
+		if pendingWithPriority[i].priority == pendingWithPriority[j].priority {
+			// Stable tie-breaker: preserve original order
+			return pendingWithPriority[i].index < pendingWithPriority[j].index
+		}
+		return pendingWithPriority[i].priority > pendingWithPriority[j].priority
 	})
-	for _, pod := range pendingPods {
-		w.schedulePod(&pod)
+	for _, item := range pendingWithPriority {
+		w.schedulePod(item.pod)
 	}
 }
 

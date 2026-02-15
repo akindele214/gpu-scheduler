@@ -1,4 +1,4 @@
-# I GPU-Scheduler Roadmap — From MVP to Production
+# GPU-Scheduler Roadmap — From MVP to Production
 
 **Goal:** Build an efficient, Kubernetes-native GPU scheduler that maximizes utilization (from 28% to 75%+), reduces costs, and handles the overlooked pain points in AI/ML workloads—including workflow separation, KV cache fragmentation, IO bottlenecks, and thermal management.
 
@@ -153,21 +153,22 @@ INFO  Scheduling latency: 12ms
 ### Completed
 
 1. **Workflow Labeling & Routing** ✅
+
    - Workflow types via annotation: `gpu-scheduler/workflow: build | train | inference`
    - Config-based workflow priority mapping
    - Route jobs to appropriate scheduling policies based on workflow type
-
 2. **Priority-Based Scheduling** ✅
+
    - Priority via annotation: `gpu-scheduler/priority: <int>` (higher = scheduled first)
    - Pods sorted by priority before scheduling
    - Handles equal-priority pods (FIFO-ish, determined by K8s return order)
-
 3. **Gang Scheduling** ✅
+
    - Multi-GPU requests via `nvidia.com/gpu` resource limits
    - Atomic allocation: all GPUs or none (via `ScheduleGang`)
    - Correctly stays Pending when insufficient GPUs available
-
 4. **Real GPU Testing** ✅
+
    - Validated on k3s cluster with 4x RTX 4090
    - Fixed over-scheduling bug (in-memory tracking + count-based allocation)
    - Correct Pending behavior instead of UnexpectedAdmissionError
@@ -277,28 +278,24 @@ INFO  Backfill improved utilization: 72% -> 78%
      - Temperature, power, health
    - Expose gRPC or REST API for scheduler to query.
    - Report to scheduler every 5s (configurable).
-
 2. **GPU Registry** (`internal/gpu/registry.go`)
 
    - Central registry of all GPUs across cluster.
    - Maps GPU UUID → node, index, memory, current allocations.
    - Receives updates from DaemonSet agents.
    - Replaces K8sDiscoverer's guesswork with real data.
-
 3. **CUDA_VISIBLE_DEVICES Injection** (`internal/scheduler/injector.go`)
 
    - Mutating webhook OR pod spec modification.
    - When binding pod to node, inject `CUDA_VISIBLE_DEVICES=0,2` env var.
    - Pins pod to specific GPU indices chosen by bin-packer.
    - Coordinates with NVIDIA device plugin (may need to disable its allocation).
-
 4. **True Bin-Packing Allocator** (`internal/allocator/binpack.go`)
 
    - Now operates on real GPU UUIDs and actual memory.
    - Best-fit by GPU memory: pick GPU with least waste.
    - Topology-aware: prefer GPUs on same NVLink/PCIe group for multi-GPU jobs.
    - Returns specific GPU indices, not just node name.
-
 5. **Allocation Tracking** (`internal/gpu/allocations.go`)
 
    - Track: `{ pod_uid -> [gpu_uuid, memory_reserved] }`.
@@ -313,27 +310,23 @@ INFO  Backfill improved utilization: 72% -> 78%
    - Track MIG instances as separate allocatable units.
    - Map MIG profiles to resource names: `nvidia.com/mig-1g.5gb`, `nvidia.com/mig-2g.10gb`.
    - Allocator understands MIG instances vs. full GPUs.
-
 7. **Time-Slicing** (`internal/gpu/timeslice.go`)
 
    - Enable time-slicing via NVIDIA device plugin config (document setup).
    - Track oversubscription ratio per GPU (e.g., 4 pods share 1 GPU).
    - Add config: `sharing.timeslice.enabled: true`, `sharing.timeslice.replicas: 4`.
    - Metrics: `gpu_scheduler_timeslice_contention` (pods waiting per GPU).
-
 8. **Memory Tracking** (`internal/gpu/memory.go`)
 
    - Track GPU memory at finer granularity: `{ gpu_id -> { total, allocated, fragmented } }`.
    - Fragmentation = memory that can't be allocated due to non-contiguous free blocks.
    - Expose: `GetMemoryState(gpu)`, `CanFitAllocation(gpu, size)`.
-
 9. **KV Cache Awareness (Initial)** (`internal/allocator/kvcache.go`)
 
    - Add pod annotation: `gpu-scheduler.io/kv-cache-estimate: 4Gi`.
    - Factor KV cache into memory allocation decisions.
    - Prefer placing inference pods on GPUs with contiguous free memory.
    - Log warnings when fragmentation exceeds 30%.
-
 10. **Sharing Policy Engine** (`internal/allocator/sharing.go`)
 
     - Decide when to use MIG vs. time-slicing vs. exclusive allocation.
@@ -342,12 +335,10 @@ INFO  Backfill improved utilization: 72% -> 78%
       - Inference jobs (small): time-slicing or MIG.
       - Inference jobs (large KV cache): exclusive or MIG partition.
     - Add config: `sharing.policy: auto | mig | timeslice | exclusive`.
-
 11. **Multi-Tenancy Labels** (`pkg/types/types.go`)
 
     - Add namespace-based isolation: pods in different namespaces don't share GPUs by default.
     - Annotation override: `gpu-scheduler.io/allow-sharing: true`.
-
 12. **Metrics** (`internal/metrics/prometheus.go`)
 
     - `gpu_scheduler_memory_fragmentation_ratio` (per GPU)

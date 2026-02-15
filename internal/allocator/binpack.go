@@ -48,6 +48,9 @@ func (bp *BinPacker) ScheduleGang(job *types.Job, nodes []types.NodeInfo, gpuCou
 	if job == nil {
 		return nil, fmt.Errorf("job cannot be nil")
 	}
+	if gpuCount <= 0 {
+		return nil, fmt.Errorf("gpuCount must be greater than 0, got %d", gpuCount)
+	}
 	switch memoryMode {
 	case types.MemoryTotal:
 		requiredMemory = (job.MemoryMB + gpuCount - 1) / gpuCount

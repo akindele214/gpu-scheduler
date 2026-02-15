@@ -56,6 +56,9 @@ func (f *FIFOScheduler) ScheduleGang(job *types.Job, nodes []types.NodeInfo, gpu
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no nodes available")
 	}
+	if gpuCount <= 0 {
+		return nil, fmt.Errorf("gpuCount must be greater than 0, got %d", gpuCount)
+	}
 	var requiredMemory int
 
 	switch memoryMode {
@@ -65,6 +68,8 @@ func (f *FIFOScheduler) ScheduleGang(job *types.Job, nodes []types.NodeInfo, gpu
 		requiredMemory = job.MemoryMB
 	case types.MemoryNone:
 		requiredMemory = 0
+	default:
+		return nil, fmt.Errorf("unsupported memory mode: %v", memoryMode)
 	}
 	var gpuPlacements []types.GPUPlacement
 
