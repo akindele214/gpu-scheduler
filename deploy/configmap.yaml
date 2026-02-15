@@ -22,3 +22,13 @@ data:
     logging:
       level: "info"
       format: "json"
+    workflows:
+      training:
+        priority: 100
+        scheduling: "binpack"
+      inference:
+        priority: 200
+        scheduling: "fifo"
+      batch:
+        priority: 50
+        scheduling: "binpack"

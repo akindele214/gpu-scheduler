@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/akindele214/gpu-scheduler/internal/config"
 	"github.com/akindele214/gpu-scheduler/pkg/types"
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
@@ -17,20 +18,56 @@ import (
 type K8sDiscoverer struct {
 	clientset *kubernetes.Clientset
 	gpuCache  map[string]types.GPU // node-gpu-index -> GPU
+	config    *config.Config
 }
 
-func NewK8sDiscoverer(clientset *kubernetes.Clientset) (*K8sDiscoverer, error) {
+func NewK8sDiscoverer(clientset *kubernetes.Clientset, config *config.Config) (*K8sDiscoverer, error) {
 	if clientset == nil {
 		return nil, fmt.Errorf("kubernetes clientset is required")
 	}
 	return &K8sDiscoverer{
 		clientset: clientset,
+		config:    config,
 		gpuCache:  make(map[string]types.GPU),
 	}, nil
 }
 
+func (k *K8sDiscoverer) getGPUUsageByNode(ctx context.Context) (map[string]int, error) {
+	pods, err := k.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	usage := make(map[string]int)
+
+	for _, pod := range pods.Items {
+
+		if pod.Spec.NodeName == "" {
+			continue
+		}
+		// Skip completed/failed pods
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+
+		// Count GPUs from all containers
+		for _, container := range pod.Spec.Containers {
+			if quantity, exists := container.Resources.Limits["nvidia.com/gpu"]; exists {
+				usage[pod.Spec.NodeName] += int(quantity.Value())
+			}
+		}
+	}
+	return usage, nil
+}
+
 func (k *K8sDiscoverer) Discover() ([]types.GPU, error) {
 	ctx := context.Background()
+	gpuUsage, err := k.getGPUUsageByNode(ctx)
+	if err != nil {
+		log.Printf("Warning: failed to get GPU usage: %v", err)
+		gpuUsage = make(map[string]int) // Continue with empty map
+	}
+	log.Printf("GPU usage by node: %v", gpuUsage)
 	nodes, err := k.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list nodes: %w", err)
@@ -50,8 +87,8 @@ func (k *K8sDiscoverer) Discover() ([]types.GPU, error) {
 		log.Printf("Found node %s with %d GPU(s)", node.Name, gpuCount)
 
 		// Get allocatable (what's actually available)
-		allocatable, _ := node.Status.Allocatable["nvidia.com/gpu"]
-		allocatableCount := int(allocatable.Value())
+		// allocatable, _ := node.Status.Allocatable["nvidia.com/gpu"]
+		// allocatableCount := int(allocatable.Value())
 
 		// Create a GPU entry for each GPU on this node
 		for i := 0; i < gpuCount; i++ {
@@ -70,9 +107,14 @@ func (k *K8sDiscoverer) Discover() ([]types.GPU, error) {
 			totalMemoryMB := estimateGPUMemory(node.Labels)
 
 			// Calculate used memory based on allocated GPUs
+			// usedMemoryMB := 0
+			// if i >= allocatableCount {
+			// 	usedMemoryMB = totalMemoryMB // This GPU slot is fully used
+			// }
+			usedCount := gpuUsage[node.Name]
 			usedMemoryMB := 0
-			if i >= allocatableCount {
-				usedMemoryMB = totalMemoryMB // This GPU slot is fully used
+			if i < usedCount {
+				usedMemoryMB = totalMemoryMB // This GPU slot is used
 			}
 
 			gpu := types.GPU{
@@ -85,7 +127,7 @@ func (k *K8sDiscoverer) Discover() ([]types.GPU, error) {
 				IsHealthy:          isNodeReady(&node),
 				IsShared:           false,
 			}
-
+			log.Printf("GPU %d on %s: usedCount=%d, i=%d, marking as used=%v", i, node.Name, usedCount, i, i < usedCount)
 			gpus = append(gpus, gpu)
 			k.gpuCache[cacheKey] = gpu
 			gpuIndex++

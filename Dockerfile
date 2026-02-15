@@ -21,7 +21,7 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /gpu-scheduler .
 
-# Copy config
+# Copy confi
 COPY config.yaml .
 
 # Expose ports

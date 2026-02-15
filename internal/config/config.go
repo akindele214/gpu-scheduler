@@ -5,6 +5,7 @@ import "fmt"
 type Config struct {
 	Scheduler  SchedulerConfig  `mapstructure:"scheduler"`
 	Queue      QueueConfig      `mapstructure:"queue"`
+	Workflows  WorkflowConfig   `mapstructure:"workflows"`
 	GPU        GPUConfig        `mapstructure:"gpu"`
 	Kubernetes KubernetesConfig `mapstructure:"kubernetes"`
 	Logging    LoggingConfig    `mapstructure:"logging"`
@@ -14,7 +15,20 @@ type SchedulerConfig struct {
 	Name        string `mapstructure:"name"`
 	Port        int    `mapstructure:"port"`
 	MetricsPort int    `mapstructure:"metricsPort"`
-	Mode        string `mapstructure:mode`
+	Mode        string `mapstructure:"mode"`
+}
+
+type WorkFlowTypeConfig struct {
+	Name        string `mapstructure:"name"`
+	Priority    int    `mapstructure:"priority"`
+	Preemptible bool   `mapstructure:"preemptible"`
+}
+
+type WorkflowConfig struct {
+	Enabled         bool                 `mapstructure:"enabled"`
+	AllowCustom     bool                 `mapstructure:"allowCustom"`
+	DefaultPriority int                  `mapstructure:"defaultPriority"`
+	Types           []WorkFlowTypeConfig `mapstructure:"types"`
 }
 
 type QueueConfig struct {
@@ -44,7 +58,23 @@ func (config *Config) Validate() error {
 	if config.Queue.MaxSize <= 0 {
 		return fmt.Errorf("queue.maxSize must be greater than 0")
 	}
-	if config.Scheduler.Port < 1 || config.Scheduler.Port > 655535 {
+	if config.Workflows.Enabled {
+		if config.Workflows.DefaultPriority < 0 || config.Workflows.DefaultPriority > 100 {
+			return fmt.Errorf("workflows.defaultPriority must be between 0-100")
+		}
+		if len(config.Workflows.Types) < 1 {
+			return fmt.Errorf("workflows.types must have at least one workflow when enabled")
+		}
+		for i, wf := range config.Workflows.Types {
+			if wf.Name == "" {
+				return fmt.Errorf("workflow at index [%d] name cannot be empty", i)
+			}
+			if wf.Priority < 0 || wf.Priority > 100 {
+				return fmt.Errorf("workflow '%s' priority must be between 0-100", wf.Name)
+			}
+		}
+	}
+	if config.Scheduler.MetricsPort < 1 || config.Scheduler.MetricsPort > 655535 {
 		return fmt.Errorf("scheduler.port should be between 1-65535")
 	}
 	if config.Scheduler.MetricsPort < 1 || config.Scheduler.MetricsPort > 655535 {

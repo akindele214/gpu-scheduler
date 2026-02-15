@@ -2,6 +2,10 @@ package gpu
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 
 	"github.com/akindele214/gpu-scheduler/pkg/types"
 	"github.com/google/uuid"
@@ -64,19 +68,123 @@ func (m *MockDiscoverer) Shutdown() error {
 
 type NVMLDiscoverer struct {
 	nodeName string
+	// gpuUUIDs maps nvidia-smi GPU UUID strings to our internal UUIDs
+	// so that GPU identity is stable across Discover/Refresh calls.
+	gpuUUIDs map[string]uuid.UUID
 }
 
 func NewNVMLDiscoverer(nodeName string) (*NVMLDiscoverer, error) {
-	// TODO: Initialize real NVML library here
-	return nil, fmt.Errorf("NVML not implemented yet")
+	if nodeName == "" {
+		hostname, err := os.Hostname()
+		if err != nil {
+			nodeName = "localhost"
+		} else {
+			nodeName = hostname
+		}
+	}
+
+	d := &NVMLDiscoverer{
+		nodeName: nodeName,
+		gpuUUIDs: make(map[string]uuid.UUID),
+	}
+
+	// Verify nvidia-smi is available
+	if _, err := exec.LookPath("nvidia-smi"); err != nil {
+		return nil, fmt.Errorf("nvidia-smi not found in PATH: %w", err)
+	}
+
+	return d, nil
 }
+
+// queryGPUs runs nvidia-smi and parses the CSV output into GPU structs.
+func (n *NVMLDiscoverer) queryGPUs() ([]types.GPU, error) {
+	out, err := exec.Command("nvidia-smi",
+		"--query-gpu=index,uuid,memory.total,memory.used,utilization.gpu",
+		"--format=csv,noheader,nounits",
+	).Output()
+	if err != nil {
+		return nil, fmt.Errorf("nvidia-smi failed: %w", err)
+	}
+
+	var gpus []types.GPU
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		fields := strings.Split(line, ", ")
+		if len(fields) < 5 {
+			return nil, fmt.Errorf("unexpected nvidia-smi output: %q", line)
+		}
+
+		index, err := strconv.Atoi(strings.TrimSpace(fields[0]))
+		if err != nil {
+			return nil, fmt.Errorf("parsing GPU index %q: %w", fields[0], err)
+		}
+
+		nvidiaUUID := strings.TrimSpace(fields[1])
+
+		totalMem, err := strconv.Atoi(strings.TrimSpace(fields[2]))
+		if err != nil {
+			return nil, fmt.Errorf("parsing total memory %q: %w", fields[2], err)
+		}
+
+		usedMem, err := strconv.Atoi(strings.TrimSpace(fields[3]))
+		if err != nil {
+			return nil, fmt.Errorf("parsing used memory %q: %w", fields[3], err)
+		}
+
+		util, err := strconv.Atoi(strings.TrimSpace(fields[4]))
+		if err != nil {
+			return nil, fmt.Errorf("parsing utilization %q: %w", fields[4], err)
+		}
+
+		// Maintain stable UUID for each physical GPU
+		id, exists := n.gpuUUIDs[nvidiaUUID]
+		if !exists {
+			id = uuid.New()
+			n.gpuUUIDs[nvidiaUUID] = id
+		}
+
+		gpus = append(gpus, types.GPU{
+			ID:                 id,
+			Index:              index,
+			NodeName:           n.nodeName,
+			TotalMemoryMB:      totalMem,
+			UsedMemoryMB:       usedMem,
+			UtilizationPercent: float64(util),
+			IsHealthy:          true,
+			IsShared:           false,
+		})
+	}
+
+	if len(gpus) == 0 {
+		return nil, fmt.Errorf("nvidia-smi returned no GPUs")
+	}
+
+	return gpus, nil
+}
+
 func (n *NVMLDiscoverer) Discover() ([]types.GPU, error) {
-	// TODO: Initialize real NVML library here
-	return nil, fmt.Errorf("NVML not implemented yet")
+	return n.queryGPUs()
 }
 
 func (n *NVMLDiscoverer) Refresh(gpu *types.GPU) error {
-	return fmt.Errorf("NVML not implemented yet")
+	gpus, err := n.queryGPUs()
+	if err != nil {
+		return err
+	}
+	for _, g := range gpus {
+		if g.ID == gpu.ID {
+			gpu.UsedMemoryMB = g.UsedMemoryMB
+			gpu.UtilizationPercent = g.UtilizationPercent
+			gpu.IsHealthy = g.IsHealthy
+			return nil
+		}
+	}
+	return fmt.Errorf("GPU %s not found after refresh", gpu.ID)
 }
 
 func (n *NVMLDiscoverer) Shutdown() error {
