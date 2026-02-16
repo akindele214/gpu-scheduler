@@ -106,6 +106,8 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 		CreatedAt: time.Now(),
 	}
 	var nodeName string
+	var gpuIDs []string
+
 	if gpuCount > 1 {
 		memoryMode := GetMemoryModeFromPod(pod)
 		result, err := w.strategy.ScheduleGang(job, nodes, gpuCount, memoryMode)
@@ -126,6 +128,8 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 				// TODO: rollback previous allocations
 				return
 			}
+			gpuIDs = append(gpuIDs, placement.GPUID)
+
 		}
 	} else {
 		result, err := w.strategy.Schedule(job, nodes)
@@ -144,6 +148,7 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 			log.Printf("Failed to allocate GPU for pod %s/%s: %v", pod.Namespace, pod.Name, err)
 			return
 		}
+		gpuIDs = result.GPUIDs
 	}
 	binding := &corev1.Binding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -155,7 +160,21 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 			Name: nodeName,
 		},
 	}
-	err := w.clientSet.CoreV1().Pods(pod.Namespace).Bind(context.TODO(), binding, metav1.CreateOptions{})
+
+	injector := NewInjector()
+	mutatedPod, changed, err := injector.Inject(pod, gpuIDs)
+	if err != nil {
+		log.Printf("Failed to inject into pod env %v", err)
+		return
+	}
+	if changed {
+		_, err := w.clientSet.CoreV1().Pods(pod.Namespace).Update(context.TODO(), mutatedPod, metav1.UpdateOptions{})
+		if err != nil {
+			log.Printf("Failed to update pod with GPU env: %v", err)
+			return
+		}
+	}
+	err = w.clientSet.CoreV1().Pods(pod.Namespace).Bind(context.TODO(), binding, metav1.CreateOptions{})
 	if err != nil {
 		log.Printf("Failed to bind pod %s/%s to node %s: %v", pod.Namespace, pod.Name, nodeName, err)
 		return
