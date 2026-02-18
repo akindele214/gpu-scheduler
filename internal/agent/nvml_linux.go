@@ -116,9 +116,9 @@ func collectGPUInfo(device nvml.Device, index int) (GPUInfo, error) {
 	}
 
 	// MIG
-	migMode, _, ret := device.GetMIGMode()
+	migMode, _, ret := device.GetMigMode()
 	if ret != nvml.SUCCESS {
-		return gpu, fmt.Errorf("GetMIGMode: %v", nvml.ErrorString(ret))
+		return gpu, fmt.Errorf("GetMigMode: %v", nvml.ErrorString(ret))
 	}
 	gpu.MIGEnabled = migMode == nvml.DEVICE_MIG_ENABLE
 
@@ -134,20 +134,20 @@ func collectGPUInfo(device nvml.Device, index int) (GPUInfo, error) {
 }
 
 func collectMIGInstances(device nvml.Device) ([]MIGInstance, error) {
-	maxMIGDevices, ret := device.GetMaxMIGDeviceCount()
+	maxMIGDevices, ret := device.GetMaxMigDeviceCount()
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("GetMaxMIGDeviceCount: %v", nvml.ErrorString(ret))
+		return nil, fmt.Errorf("GetMaxMigDeviceCount: %v", nvml.ErrorString(ret))
 	}
 
 	instances := make([]MIGInstance, 0, maxMIGDevices)
 
 	for gi := 0; gi < maxMIGDevices; gi++ {
-		migDevice, ret := device.GetMIGDeviceHandleByIndex(gi)
+		migDevice, ret := device.GetMigDeviceHandleByIndex(gi)
 		if ret == nvml.ERROR_NOT_FOUND || ret == nvml.ERROR_INVALID_ARGUMENT {
 			continue // slot not populated
 		}
 		if ret != nvml.SUCCESS {
-			return nil, fmt.Errorf("GetMIGDeviceHandleByIndex(%d): %v", gi, nvml.ErrorString(ret))
+			return nil, fmt.Errorf("GetMigDeviceHandleByIndex(%d): %v", gi, nvml.ErrorString(ret))
 		}
 
 		inst := MIGInstance{GIIndex: gi, CIIndex: 0, IsAvailable: true}
