@@ -1,16 +1,29 @@
 package gpu
 
 import (
+	"log"
 	"sync"
 	"time"
 
 	"github.com/akindele214/gpu-scheduler/internal/agent"
+	"github.com/akindele214/gpu-scheduler/internal/metrics"
+	"github.com/akindele214/gpu-scheduler/pkg/types"
 )
 
 type Registry struct {
 	mu       sync.RWMutex
 	nodes    map[string]*NodeGPUs // nodeName -> GPU state
 	lastSeen map[string]time.Time // nodeName -> last report time
+
+	// Reservation tracking (separate from agent-reported usage)
+	reservations   map[string]map[string]int // nodeName -> gpuUUID -> reservedMB
+	podAllocations map[string]*PodAllocation // "namespace/name" -> allocation info
+}
+
+type PodAllocation struct {
+	NodeName string
+	GPUUUID  string
+	MemoryMB int
 }
 
 type NodeGPUs struct {
@@ -21,8 +34,10 @@ type NodeGPUs struct {
 
 func NewRegistry() *Registry {
 	return &Registry{
-		nodes:    make(map[string]*NodeGPUs),
-		lastSeen: make(map[string]time.Time),
+		nodes:          make(map[string]*NodeGPUs),
+		lastSeen:       make(map[string]time.Time),
+		reservations:   make(map[string]map[string]int),
+		podAllocations: make(map[string]*PodAllocation),
 	}
 }
 
@@ -36,6 +51,10 @@ func (r *Registry) UpdateFromReport(report *agent.GPUReport) {
 		NodeName:   report.NodeName,
 		ReportedAt: reportTime,
 		GPUs:       report.GPUs,
+	}
+	for _, gpu := range report.GPUs {
+		metrics.GPUTotalMemory.WithLabelValues(report.NodeName, gpu.UUID).Set(float64(gpu.TotalMemoryMB))
+		metrics.GPUUtilizationPerc.WithLabelValues(report.NodeName, gpu.UUID).Set(float64(gpu.UtilizationGPU))
 	}
 }
 
@@ -151,23 +170,76 @@ func (r *Registry) MarkMIGAllocated(nodeName, migUUID string) {
 	}
 }
 
-// MarkGPUAllocated increases used memory on a full GPU (O(1) node lookup)
-func (r *Registry) MarkGPUAllocated(nodeName, gpuUUID string, memoryMB int) {
+// MarkGPUAllocatedForPod reserves memory for a specific pod (tracked separately from agent-reported usage)
+func (r *Registry) MarkGPUAllocatedForPod(nodeName, gpuUUID string, memoryMB int, namespace, podName string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	node, exists := r.nodes[nodeName]
-	if !exists {
-		return
+	podKey := namespace + "/" + podName
+
+	// Initialize node reservations map if needed
+	if r.reservations[nodeName] == nil {
+		r.reservations[nodeName] = make(map[string]int)
 	}
 
-	for i := range node.GPUs {
-		if node.GPUs[i].UUID == gpuUUID {
-			node.GPUs[i].UsedMemoryMB += memoryMB
-			node.GPUs[i].FreeMemoryMB = node.GPUs[i].TotalMemoryMB - node.GPUs[i].UsedMemoryMB
-			return
+	// Add reservation
+	r.reservations[nodeName][gpuUUID] += memoryMB
+
+	// Track pod allocation for release on pod completion
+	r.podAllocations[podKey] = &PodAllocation{
+		NodeName: nodeName,
+		GPUUUID:  gpuUUID,
+		MemoryMB: memoryMB,
+	}
+
+	totalReserved := r.reservations[nodeName][gpuUUID]
+	metrics.GPUReservedMemoryMB.WithLabelValues(nodeName, gpuUUID).Set(float64(totalReserved))
+	log.Printf("[ALLOC] Pod %s: reserved %d MB on GPU %s (total reserved: %d MB)",
+		podKey, memoryMB, gpuUUID[:12], totalReserved)
+}
+
+// ReleasePod releases GPU memory reservation when a pod completes or is deleted
+func (r *Registry) ReleasePod(namespace, podName string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	podKey := namespace + "/" + podName
+	alloc, exists := r.podAllocations[podKey]
+	if !exists {
+		return // Pod wasn't tracked (maybe scheduled before restart)
+	}
+
+	// Release reservation
+	if r.reservations[alloc.NodeName] != nil {
+		r.reservations[alloc.NodeName][alloc.GPUUUID] -= alloc.MemoryMB
+		if r.reservations[alloc.NodeName][alloc.GPUUUID] < 0 {
+			r.reservations[alloc.NodeName][alloc.GPUUUID] = 0
+			metrics.GPUReservedMemoryMB.WithLabelValues(alloc.NodeName, alloc.GPUUUID).Set(float64(0))
+		} else {
+			metrics.GPUReservedMemoryMB.WithLabelValues(alloc.NodeName, alloc.GPUUUID).Set(float64(r.reservations[alloc.NodeName][alloc.GPUUUID]))
 		}
 	}
+
+	delete(r.podAllocations, podKey)
+	log.Printf("[RELEASE] Pod %s: released %d MB on GPU %s",
+		podKey, alloc.MemoryMB, alloc.GPUUUID[:12])
+}
+
+// GetReservedMemory returns total reserved memory for a GPU
+func (r *Registry) GetReservedMemory(nodeName, gpuUUID string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.reservations[nodeName] == nil {
+		return 0
+	}
+	return r.reservations[nodeName][gpuUUID]
+}
+
+// MarkGPUAllocated is deprecated - use MarkGPUAllocatedForPod instead
+// Kept for backward compatibility but does NOT track reservations properly
+func (r *Registry) MarkGPUAllocated(nodeName, gpuUUID string, memoryMB int) {
+	log.Printf("[ALLOC] WARNING: Using deprecated MarkGPUAllocated - reservations won't persist!")
 }
 
 // ReleaseMIG sets a MIG instance as available (O(1) node lookup)
@@ -210,4 +282,53 @@ func (r *Registry) ReleaseGPU(nodeName, gpuUUID string, memoryMB int) {
 			return
 		}
 	}
+}
+
+// GetNodes converts registry data to []types.NodeInfo for the scheduler/watcher.
+// Uses RESERVED memory (not agent-reported) for scheduling decisions.
+func (r *Registry) GetNodes() []types.NodeInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	nodes := make([]types.NodeInfo, 0, len(r.nodes))
+	for nodeName, nodeGPUs := range r.nodes {
+		gpus := make([]types.GPU, 0, len(nodeGPUs.GPUs))
+		availableCount := 0
+
+		// Get reservations for this node
+		nodeReservations := r.reservations[nodeName]
+
+		for _, g := range nodeGPUs.GPUs {
+			// Use RESERVED memory, not agent-reported
+			reservedMB := 0
+			if nodeReservations != nil {
+				reservedMB = nodeReservations[g.UUID]
+			}
+
+			gpu := types.GPU{
+				ID:                 g.UUID,
+				Index:              g.Index,
+				NodeName:           nodeName,
+				TotalMemoryMB:      g.TotalMemoryMB,
+				UsedMemoryMB:       reservedMB, // Use reserved, not actual
+				UtilizationPercent: float64(g.UtilizationGPU),
+				IsHealthy:          g.IsHealthy,
+				IsShared:           false,
+			}
+			gpus = append(gpus, gpu)
+			if g.IsHealthy {
+				availableCount++
+			}
+		}
+
+		nodes = append(nodes, types.NodeInfo{
+			Name:          nodeName,
+			GPUs:          gpus,
+			TotalGPUs:     len(gpus),
+			AvailableGPUs: availableCount,
+			Labels:        make(map[string]string),
+			Conditions:    []string{"Ready"},
+		})
+	}
+	return nodes
 }

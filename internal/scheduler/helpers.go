@@ -6,10 +6,15 @@ import (
 	"github.com/akindele214/gpu-scheduler/internal/config"
 	"github.com/akindele214/gpu-scheduler/pkg/types"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 )
 
 func GetGPUMemoryFromPod(pod *corev1.Pod) int {
-	value, exists := pod.Annotations["gpu-scheduler/memory-mb"]
+	// Check both annotation formats for compatibility
+	value, exists := pod.Annotations["gpu-scheduler.io/memory-mb"]
+	if !exists {
+		value, exists = pod.Annotations["gpu-scheduler/memory-mb"]
+	}
 	if exists {
 		memory, err := strconv.Atoi(value)
 		if err == nil {
@@ -92,4 +97,19 @@ func GetMemoryModeFromPod(pod *corev1.Pod) types.MemoryMode {
 		}
 	}
 	return types.MemoryPerGPU
+}
+
+func IsGPUPod(pod *corev1.Pod) bool {
+	if _, ok := pod.Annotations["gpu-scheduler.io/memory-mb"]; ok {
+		return true
+	}
+	// Check resource request
+	for _, container := range pod.Spec.Containers {
+		if qty, ok := container.Resources.Requests[v1.ResourceName("nvidia.com/gpu")]; ok {
+			if !qty.IsZero() {
+				return true
+			}
+		}
+	}
+	return false
 }

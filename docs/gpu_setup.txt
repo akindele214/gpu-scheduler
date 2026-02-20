@@ -1,0 +1,47 @@
+Phase 1: Prerequisites
+1.  Verify NVIDIA driver is working (nvidia-smi)
+    > nvidia-smi
+2.  Install NVIDIA Container Toolkit
+    - First check if Toolkit is installed
+        > nvidia-ctk --version
+    - Else
+        > curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+            && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+                sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+                sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+        > sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+3.  Configure nvidia as default runtime for containerd
+    > sudo mkdir -p /var/lib/rancher/k3s/agent/etc/containerd
+    > sudo tee /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl > /dev/null << 'EOF'
+        version = 2
+
+        [plugins."io.containerd.grpc.v1.cri".containerd]
+        default_runtime_name = "nvidia"
+
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
+        privileged_without_host_devices = false
+        runtime_engine = ""
+        runtime_root = ""
+        runtime_type = "io.containerd.runc.v2"
+
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
+        BinaryName = "/usr/bin/nvidia-container-runtime"
+        EOF    
+
+Phase 2: k3s Install
+4.  Install k3s (it will use the pre-configured nvidia runtime)
+    > curl -sfL https://get.k3s.io | sh -
+5.  Fix kubeconfig permissions
+    > mkdir -p ~/.kube
+    > sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+    > sudo chown $(id -u):$(id -g) ~/.kube/config
+    > export KUBECONFIG=~/.kube/config
+    > echo 'export KUBECONFIG=~/.kube/config' >> ~/.bashrc
+
+Phase 3: Device Plugin
+6.  Deploy NVIDIA device plugin (simplified manifest, no node selector)
+7.  Verify nvidia.com/gpu shows in node allocatable
+
+
+
+Command to copy> rsync -av -e "ssh -i vast-key" --exclude='.git' --exclude='bin' /Users/akindele214/Desktop/Dev/go_projects/go-scheduler ubuntu@161.153.25.106:~/ 

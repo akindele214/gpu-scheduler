@@ -17,13 +17,14 @@ import (
 	"github.com/akindele214/gpu-scheduler/internal/config"
 	"github.com/akindele214/gpu-scheduler/internal/gpu"
 	"github.com/akindele214/gpu-scheduler/internal/scheduler"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 func main() {
-	fmt.Println("HELLO WORLD")
+	fmt.Println("GPU Scheduler is starting")
 	s, err := NewScheduler()
 	if err != nil {
 		log.Fatalf("Failed to create scheduler: %v", err)
@@ -125,14 +126,17 @@ func NewScheduler() (*Scheduler, error) {
 		s.watcher = scheduler.NewWatcher(
 			clientset,
 			manager,
+			registry, // Pass registry for live agent data
 			strategy, // Pass the BinPacker
 			cfg.Scheduler.Name,
 			cfg.GPU.PollIntervalSeconds,
 			cfg.Workflows,
+			s.stopCh,
 		)
 		log.Println("Running in STANDALONE mode")
 		mux := http.NewServeMux()
 		s.registerGPUReportEndpoint(mux)
+		mux.Handle("/metrics", promhttp.Handler())
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
@@ -150,7 +154,7 @@ func NewScheduler() (*Scheduler, error) {
 		mux := http.NewServeMux()
 		ext.RegisterRoutes(mux)
 		s.registerGPUReportEndpoint(mux)
-
+		mux.Handle("/metrics", promhttp.Handler())
 		s.server = &http.Server{
 			Addr:    fmt.Sprintf(":%d", cfg.Scheduler.Port),
 			Handler: mux,
@@ -226,7 +230,19 @@ func (s *Scheduler) registerGPUReportEndpoint(mux *http.ServeMux) {
 		}
 
 		s.registry.UpdateFromReport(&report)
-		log.Printf("Received GPU report from node %s: %d GPUs", report.NodeName, len(report.GPUs))
+
+		// Log detailed GPU state with both actual and reserved memory
+		var totalMem, usedMem, reservedMem int
+		for _, gpu := range report.GPUs {
+			totalMem += gpu.TotalMemoryMB
+			usedMem += gpu.UsedMemoryMB
+			reservedMem += s.registry.GetReservedMemory(report.NodeName, gpu.UUID)
+		}
+		log.Printf("[REPORT] Node %s: %d GPU(s), actual=%d MB, reserved=%d MB, total=%d MB (%.1f%% actual, %.1f%% reserved), MIG=%v",
+			report.NodeName, len(report.GPUs), usedMem, reservedMem, totalMem,
+			float64(usedMem)/float64(totalMem)*100,
+			float64(reservedMem)/float64(totalMem)*100,
+			len(report.GPUs) > 0 && report.GPUs[0].MIGEnabled)
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))

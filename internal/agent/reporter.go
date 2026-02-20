@@ -70,7 +70,7 @@ func (r *Reporter) reportOnce() error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode) // ✅ Returns error
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode) // ❌ Returns error
 
 	}
 
