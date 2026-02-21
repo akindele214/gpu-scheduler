@@ -25,7 +25,7 @@ func (f *FIFOScheduler) Schedule(job *types.Job, nodes []types.NodeInfo) (*types
 
 	for _, node := range nodes {
 		for _, gpu := range node.GPUs {
-			if !gpu.IsHealthy {
+			if !gpu.IsHealthy || (!job.Shared && gpu.AllocatedPods > 0) {
 				continue
 			}
 			// Skip fully-used GPUs (count-based allocation)
@@ -78,7 +78,7 @@ func (f *FIFOScheduler) ScheduleGang(job *types.Job, nodes []types.NodeInfo, gpu
 		}
 		gpuPlacements = []types.GPUPlacement{}
 		for _, gpu := range node.GPUs {
-			if !gpu.IsHealthy {
+			if !gpu.IsHealthy || (!job.Shared && gpu.AllocatedPods > 0) {
 				continue
 			}
 			// Skip fully-used GPUs (count-based allocation)

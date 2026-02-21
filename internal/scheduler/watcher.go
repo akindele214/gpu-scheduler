@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
@@ -46,25 +45,23 @@ func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, registry 
 		schedulerName: schedulerName,
 		pollInterval:  pollInterval,
 		workflowCfg:   workflowCfg,
-		// informerFactory: ,
-
 	}
 	podInformer := factory.Core().V1().Pods().Informer()
 	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			// Your update logic here
-			newPod, _ := newObj.(*v1.Pod)
+
+			newPod, _ := newObj.(*corev1.Pod)
 			if !IsGPUPod(newPod) {
 				return
 			}
-			if newPod.Status.Phase == v1.PodSucceeded || newPod.Status.Phase == v1.PodFailed {
+			if newPod.Status.Phase == corev1.PodSucceeded || newPod.Status.Phase == corev1.PodFailed {
 				log.Printf("[CLEANUP] Pod %s/%s completed (phase=%s), releasing GPU reservation", newPod.Namespace, newPod.Name, newPod.Status.Phase)
 				watcher.registry.ReleasePod(newPod.Namespace, newPod.Name)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
-			// Your delete logic here
-			pod, ok := obj.(*v1.Pod)
+
+			pod, ok := obj.(*corev1.Pod)
 			if !ok {
 				// Handle tombstone
 				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
@@ -72,7 +69,7 @@ func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, registry 
 					log.Printf("[CLEANUP] Error: unexpected object type %T", obj)
 					return
 				}
-				pod, ok = tombstone.Obj.(*v1.Pod)
+				pod, ok = tombstone.Obj.(*corev1.Pod)
 				if !ok {
 					log.Printf("[CLEANUP] Error: tombstone contained non-Pod object")
 					return
@@ -93,7 +90,7 @@ func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, registry 
 	factory.Start(stopCh)
 
 	// Wait for cache sync
-	// factory.WaitForCacheSync(stopCh)
+	watcher.reconcileExistingPods()
 	return watcher
 }
 
@@ -182,6 +179,7 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 		GPUCount:  gpuCount,
 		Status:    types.Pending,
 		Workflow:  GetWorkflowFromPod(pod), // optional: check annotation
+		Shared:    IsSharedGPUPod(pod),
 		CreatedAt: time.Now(),
 	}
 	var nodeName string
@@ -265,4 +263,29 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 
 	log.Printf("Successfully scheduled pod %s/%s to node %s with GPUs: %s", pod.Namespace, pod.Name, nodeName, gpuAnnotation)
 
+}
+
+func (w *Watcher) reconcileExistingPods() {
+	ctx := context.Background()
+	pods, err := w.clientSet.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Printf("error gets pods %s", err.Error())
+		return
+	}
+	for _, pod := range pods.Items {
+		if pod.Spec.SchedulerName == w.schedulerName &&
+			pod.Status.Phase == corev1.PodRunning &&
+			pod.Spec.NodeName != "" {
+			gpuUUIDs := GetAssignedGPUS(&pod)
+			if len(gpuUUIDs) == 0 || gpuUUIDs[0] == "" {
+				continue
+			}
+			log.Printf("[RECONCILE] Pod %s/%s on node %s: restoring %d GPU(s)",
+				pod.Namespace, pod.Name, pod.Spec.NodeName, len(gpuUUIDs))
+			for _, gpuId := range gpuUUIDs {
+				memoryPerGPU := GetGPUMemoryFromPod(&pod) / len(gpuUUIDs)
+				w.registry.MarkGPUAllocatedForPod(pod.Spec.NodeName, gpuId, memoryPerGPU, pod.Namespace, pod.Name)
+			}
+		}
+	}
 }

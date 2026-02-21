@@ -46,14 +46,15 @@ func main() {
 }
 
 type Scheduler struct {
-	config    *config.Config
-	manager   *gpu.Manager
-	allocator *allocator.Allocator
-	extender  *scheduler.Extender
-	registry  *gpu.Registry
-	watcher   *scheduler.Watcher
-	server    *http.Server
-	stopCh    chan struct{}
+	config        *config.Config
+	manager       *gpu.Manager
+	allocator     *allocator.Allocator
+	extender      *scheduler.Extender
+	registry      *gpu.Registry
+	watcher       *scheduler.Watcher
+	server        *http.Server
+	webhookServer *http.Server
+	stopCh        chan struct{}
 }
 
 func NewScheduler() (*Scheduler, error) {
@@ -146,6 +147,14 @@ func NewScheduler() (*Scheduler, error) {
 			Handler: mux,
 		}
 
+		// Webhook HTTPS server (for mutating admission webhook)
+		webhookMux := http.NewServeMux()
+		webhookMux.HandleFunc("/mutate", scheduler.HandleMutate)
+		s.webhookServer = &http.Server{
+			Addr:    ":8443",
+			Handler: webhookMux,
+		}
+
 	} else {
 		// Extender mode
 		ext := scheduler.NewExtender(alloc, kubeClient)
@@ -178,6 +187,20 @@ func (s *Scheduler) Run() error {
 				log.Printf("HTTP server error: %v", err)
 			}
 		}()
+		// Start webhook HTTPS server if certs exist
+		certFile := "certs/tls.crt"
+		keyFile := "certs/tls.key"
+		if _, err := os.Stat(certFile); err == nil {
+			go func() {
+				log.Printf("Starting webhook HTTPS server on :8443")
+				if err := s.webhookServer.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+					log.Printf("Webhook server error: %v", err)
+				}
+			}()
+		} else {
+			log.Println("No certs/tls.crt found, webhook server disabled")
+		}
+
 		s.watcher.Run() // This blocks
 		return nil
 	}
@@ -199,6 +222,12 @@ func (s *Scheduler) Stop() {
 		defer cancel()
 		s.server.Shutdown(ctx)
 	}
+	if s.webhookServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.webhookServer.Shutdown(ctx)
+	}
+
 }
 
 func (s *Scheduler) refreshLoop() {

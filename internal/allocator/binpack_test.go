@@ -45,6 +45,27 @@ func makeJob(name string, memoryMB int) *types.Job {
 	}
 }
 
+// Helper to create a GPU with AllocatedPods set
+func makeAllocatedGPU(totalMB, usedMB int, healthy bool, allocatedPods int) types.GPU {
+	return types.GPU{
+		ID:            "GPU-" + uuid.New().String(),
+		TotalMemoryMB: totalMB,
+		UsedMemoryMB:  usedMB,
+		IsHealthy:     healthy,
+		AllocatedPods: allocatedPods,
+	}
+}
+
+// Helper to create a shared job
+func makeSharedJob(name string, memoryMB int) *types.Job {
+	return &types.Job{
+		ID:       uuid.New(),
+		Name:     name,
+		MemoryMB: memoryMB,
+		Shared:   true,
+	}
+}
+
 func TestSchedule_NilJob(t *testing.T) {
 	bp := NewBinPacker()
 	nodes := []types.NodeInfo{makeNode("node-1", []types.GPU{makeGPU(80000, 0, true)})}
@@ -519,5 +540,120 @@ func TestScheduleGang_NilJob(t *testing.T) {
 	_, err := bp.ScheduleGang(nil, nodes, 1, types.MemoryPerGPU)
 	if err == nil {
 		t.Error("expected error for nil job, got nil")
+	}
+}
+
+// ── GPU sharing tests ────────────────────────────────────────────────────────
+
+func TestSchedule_NonSharedJob_SkipsAllocatedGPU(t *testing.T) {
+	bp := NewBinPacker()
+	job := makeJob("test-job", 10000) // non-shared (default)
+
+	// GPU-1 already has a pod, GPU-2 is free
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeAllocatedGPU(80000, 10000, true, 1), // allocated — should be skipped
+		}),
+		makeNode("node-2", []types.GPU{
+			makeAllocatedGPU(80000, 0, true, 0), // free
+		}),
+	}
+
+	result, err := bp.Schedule(job, nodes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NodeName != "node-2" {
+		t.Errorf("expected non-shared job on 'node-2' (free GPU), got '%s'", result.NodeName)
+	}
+}
+
+func TestSchedule_NonSharedJob_FailsWhenAllGPUsAllocated(t *testing.T) {
+	bp := NewBinPacker()
+	job := makeJob("test-job", 10000) // non-shared
+
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeAllocatedGPU(80000, 10000, true, 1), // allocated
+		}),
+		makeNode("node-2", []types.GPU{
+			makeAllocatedGPU(80000, 10000, true, 1), // allocated
+		}),
+	}
+
+	_, err := bp.Schedule(job, nodes)
+	if err == nil {
+		t.Error("expected error when all GPUs are allocated and job is non-shared, got nil")
+	}
+}
+
+func TestSchedule_SharedJob_UsesAllocatedGPU(t *testing.T) {
+	bp := NewBinPacker()
+	job := makeSharedJob("shared-job", 10000) // shared
+
+	// Only one GPU and it already has a pod, but shared job should still use it
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeAllocatedGPU(80000, 10000, true, 1), // allocated but has memory
+		}),
+	}
+
+	result, err := bp.Schedule(job, nodes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NodeName != "node-1" {
+		t.Errorf("expected shared job on 'node-1', got '%s'", result.NodeName)
+	}
+}
+
+func TestScheduleGang_NonSharedJob_SkipsAllocatedGPUs(t *testing.T) {
+	bp := NewBinPacker()
+	job := makeJob("gang-job", 8000) // non-shared
+
+	// Node-1: 3 GPUs but 1 is allocated → only 2 eligible
+	// Need 3 GPUs → should fail
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeAllocatedGPU(16000, 0, true, 0),
+			makeAllocatedGPU(16000, 8000, true, 1), // allocated
+			makeAllocatedGPU(16000, 0, true, 0),
+		}),
+	}
+
+	_, err := bp.ScheduleGang(job, nodes, 3, types.MemoryPerGPU)
+	if err == nil {
+		t.Error("expected error when not enough unallocated GPUs for non-shared gang job, got nil")
+	}
+
+	// But 2 GPUs should work
+	result, err := bp.ScheduleGang(job, nodes, 2, types.MemoryPerGPU)
+	if err != nil {
+		t.Fatalf("unexpected error for 2-GPU gang: %v", err)
+	}
+	if len(result.Placements) != 2 {
+		t.Errorf("expected 2 placements, got %d", len(result.Placements))
+	}
+}
+
+func TestScheduleGang_SharedJob_UsesAllocatedGPUs(t *testing.T) {
+	bp := NewBinPacker()
+	job := makeSharedJob("gang-job", 4000) // shared
+
+	// All 3 GPUs have pods but have memory available
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeAllocatedGPU(16000, 4000, true, 1),
+			makeAllocatedGPU(16000, 4000, true, 1),
+			makeAllocatedGPU(16000, 4000, true, 1),
+		}),
+	}
+
+	result, err := bp.ScheduleGang(job, nodes, 3, types.MemoryPerGPU)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Placements) != 3 {
+		t.Errorf("expected 3 placements, got %d", len(result.Placements))
 	}
 }

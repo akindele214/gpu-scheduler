@@ -18,6 +18,7 @@ type Registry struct {
 	// Reservation tracking (separate from agent-reported usage)
 	reservations   map[string]map[string]int // nodeName -> gpuUUID -> reservedMB
 	podAllocations map[string]*PodAllocation // "namespace/name" -> allocation info
+	podCountPerGPU map[string]map[string]int
 }
 
 type PodAllocation struct {
@@ -38,6 +39,7 @@ func NewRegistry() *Registry {
 		lastSeen:       make(map[string]time.Time),
 		reservations:   make(map[string]map[string]int),
 		podAllocations: make(map[string]*PodAllocation),
+		podCountPerGPU: make(map[string]map[string]int),
 	}
 }
 
@@ -180,11 +182,12 @@ func (r *Registry) MarkGPUAllocatedForPod(nodeName, gpuUUID string, memoryMB int
 	// Initialize node reservations map if needed
 	if r.reservations[nodeName] == nil {
 		r.reservations[nodeName] = make(map[string]int)
+		r.podCountPerGPU[nodeName] = make(map[string]int)
 	}
 
 	// Add reservation
 	r.reservations[nodeName][gpuUUID] += memoryMB
-
+	r.podCountPerGPU[nodeName][gpuUUID] += 1
 	// Track pod allocation for release on pod completion
 	r.podAllocations[podKey] = &PodAllocation{
 		NodeName: nodeName,
@@ -212,8 +215,10 @@ func (r *Registry) ReleasePod(namespace, podName string) {
 	// Release reservation
 	if r.reservations[alloc.NodeName] != nil {
 		r.reservations[alloc.NodeName][alloc.GPUUUID] -= alloc.MemoryMB
+		r.podCountPerGPU[alloc.NodeName][alloc.GPUUUID] -= 1
 		if r.reservations[alloc.NodeName][alloc.GPUUUID] < 0 {
 			r.reservations[alloc.NodeName][alloc.GPUUUID] = 0
+			r.podCountPerGPU[alloc.NodeName][alloc.GPUUUID] = 0
 			metrics.GPUReservedMemoryMB.WithLabelValues(alloc.NodeName, alloc.GPUUUID).Set(float64(0))
 		} else {
 			metrics.GPUReservedMemoryMB.WithLabelValues(alloc.NodeName, alloc.GPUUUID).Set(float64(r.reservations[alloc.NodeName][alloc.GPUUUID]))
@@ -297,14 +302,19 @@ func (r *Registry) GetNodes() []types.NodeInfo {
 
 		// Get reservations for this node
 		nodeReservations := r.reservations[nodeName]
+		nodePodCounts := r.podCountPerGPU[nodeName]
 
 		for _, g := range nodeGPUs.GPUs {
 			// Use RESERVED memory, not agent-reported
 			reservedMB := 0
+			podCount := 0
+
 			if nodeReservations != nil {
 				reservedMB = nodeReservations[g.UUID]
 			}
-
+			if nodePodCounts != nil {
+				podCount = nodePodCounts[g.UUID]
+			}
 			gpu := types.GPU{
 				ID:                 g.UUID,
 				Index:              g.Index,
@@ -313,6 +323,7 @@ func (r *Registry) GetNodes() []types.NodeInfo {
 				UsedMemoryMB:       reservedMB, // Use reserved, not actual
 				UtilizationPercent: float64(g.UtilizationGPU),
 				IsHealthy:          g.IsHealthy,
+				AllocatedPods:      podCount,
 				IsShared:           false,
 			}
 			gpus = append(gpus, gpu)

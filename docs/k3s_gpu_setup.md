@@ -5,11 +5,12 @@ Tested on Ubuntu with NVIDIA A100-SXM4-40GB, Driver 570.195.03, CUDA 12.8.
 ## Prerequisites
 
 1. **Verify NVIDIA driver is working:**
+
    ```bash
    nvidia-smi
    ```
-
 2. **Install NVIDIA Container Toolkit** (if not already installed):
+
    ```bash
    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
      && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
@@ -20,6 +21,7 @@ Tested on Ubuntu with NVIDIA A100-SXM4-40GB, Driver 570.195.03, CUDA 12.8.
    ```
 
    Verify installation:
+
    ```bash
    nvidia-ctk --version
    ```
@@ -51,31 +53,37 @@ EOF
 ## Install k3s
 
 ```bash
-curl -sfL https://get.k3s.io | sh -
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --advertise-address=173.185.79.174 --tls-san=173.185.79.174 --node-external-ip=173.185.79.174" sh -
 ```
 
 ## Fix kubeconfig permissions
 
 ```bash
-mkdir -p ~/.kube
-sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
-sudo chown $(id -u):$(id -g) ~/.kube/config
-export KUBECONFIG=~/.kube/config
-echo 'export KUBECONFIG=~/.kube/config' >> ~/.bashrc
+mkdir -p ~/.kube && sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config && sudo chown $(id -u):$(id -g) ~/.kube/config
+export KUBECONFIG=~/.kube/config && echo 'export KUBECONFIG=~/.kube/config' >> ~/.bashrc
 ```
 
 Verify:
+
 ```bash
 kubectl get nodes
 ```
 
-## Install CNI plugins (if missing)
+## Install CNI plugins and flannel (if missing)
 
-If pods fail with "failed to find plugin bridge", install CNI plugins manually:
+If the node stays NotReady or pods fail with "failed to find plugin bridge", install CNI plugins and fix flannel:
 
 ```bash
 sudo mkdir -p /opt/cni/bin
 curl -L https://github.com/containernetworking/plugins/releases/download/v1.4.0/cni-plugins-linux-amd64-v1.4.0.tgz | sudo tar -xz -C /opt/cni/bin
+sudo cp /var/lib/rancher/k3s/data/current/bin/cni /opt/cni/bin/flannel
+```
+
+k3s places the flannel config in its own directory but the CNI subsystem looks in `/etc/cni/net.d/`. Symlink it:
+
+```bash
+sudo mkdir -p /etc/cni/net.d
+sudo ln -sf /var/lib/rancher/k3s/agent/etc/cni/net.d/10-flannel.conflist /etc/cni/net.d/10-flannel.conflist
 sudo systemctl restart k3s
 ```
 
@@ -126,16 +134,19 @@ EOF
 ## Verify GPU is advertised
 
 Wait for the device plugin pod to be Running:
+
 ```bash
 kubectl get pods -n kube-system -l name=nvidia-device-plugin-ds
 ```
 
 Check GPU resources:
+
 ```bash
 kubectl describe node | grep nvidia.com/gpu
 ```
 
 Expected output:
+
 ```
   nvidia.com/gpu:     1
   nvidia.com/gpu:     1
@@ -156,18 +167,27 @@ kubectl run gpu-test --rm -it --restart=Never \
 ## Troubleshooting
 
 ### Device plugin shows 0 desired pods
+
 The official NVIDIA device plugin manifest has a node selector. Use the simplified manifest above which removes it.
 
 ### kubeconfig permission denied after k3s restart
+
 Re-run the kubeconfig fix:
+
 ```bash
 sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
 sudo chown $(id -u):$(id -g) ~/.kube/config
 export KUBECONFIG=~/.kube/config
 ```
 
-### CNI plugin errors
-Install CNI plugins manually as shown above.
+### CNI plugin errors / Node stuck NotReady
+
+Install CNI plugins and symlink flannel config as shown above. k3s writes the flannel config to `/var/lib/rancher/k3s/agent/etc/cni/net.d/` but the CNI subsystem expects it in `/etc/cni/net.d/`.
+
+### NVIDIA driver/library version mismatch
+
+If `nvidia-smi` fails with "Driver/library version mismatch", the NVIDIA Container Toolkit may have updated libraries without reloading the kernel module. Reboot the instance to sync them.
 
 ### Device plugin can't find libnvidia-ml.so.1
+
 The containerd nvidia runtime is not configured correctly. Make sure you created the config.toml.tmpl BEFORE installing k3s, or reconfigure and restart k3s.

@@ -91,17 +91,15 @@ func collectGPUInfo(device nvml.Device, index int) (GPUInfo, error) {
 
 	// Utilization
 	utilRates, ret := device.GetUtilizationRates()
-	if ret != nvml.SUCCESS {
-		return gpu, fmt.Errorf("GetUtilizationRates: %v", nvml.ErrorString(ret))
+	if ret == nvml.SUCCESS {
+		gpu.UtilizationGPU = int(utilRates.Gpu)
 	}
-	gpu.UtilizationGPU = int(utilRates.Gpu)
 
 	// Temperature
 	temp, ret := device.GetTemperature(nvml.TEMPERATURE_GPU)
-	if ret != nvml.SUCCESS {
-		return gpu, fmt.Errorf("GetTemperature: %v", nvml.ErrorString(ret))
+	if ret == nvml.SUCCESS {
+		gpu.Temperature = int(temp)
 	}
-	gpu.Temperature = int(temp)
 
 	// Health — treat any non-success ECC/throttle state as unhealthy
 	throttle, ret := device.GetCurrentClocksThrottleReasons()
@@ -115,12 +113,15 @@ func collectGPUInfo(device nvml.Device, index int) (GPUInfo, error) {
 		}
 	}
 
-	// MIG
+	// MIG — many GPUs don't support MIG (e.g. 4090). GetMigMode can return
+	// ERROR_NOT_SUPPORTED, Unknown Error, or GPU requires reset. Only enable
+	// MIG when the call succeeds and explicitly reports it enabled.
 	migMode, _, ret := device.GetMigMode()
-	if ret != nvml.SUCCESS {
-		return gpu, fmt.Errorf("GetMigMode: %v", nvml.ErrorString(ret))
+	if ret == nvml.SUCCESS {
+		gpu.MIGEnabled = migMode == nvml.DEVICE_MIG_ENABLE
+	} else {
+		gpu.MIGEnabled = false
 	}
-	gpu.MIGEnabled = migMode == nvml.DEVICE_MIG_ENABLE
 
 	if gpu.MIGEnabled {
 		instances, err := collectMIGInstances(device)

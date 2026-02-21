@@ -59,6 +59,7 @@ type Job struct {
 	Status      JobStatus
 	CreatedAt   time.Time
 	ScheduledAt time.Time
+	Shared      bool
 }
 
 type GPU struct {
@@ -70,6 +71,7 @@ type GPU struct {
 	UtilizationPercent float64 // 0.0 - 100.0
 	IsHealthy          bool
 	IsShared           bool
+	AllocatedPods      int
 }
 
 // AvailableMemoryMB returns free memory on this GPU

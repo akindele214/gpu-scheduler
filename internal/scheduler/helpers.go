@@ -2,11 +2,11 @@ package scheduler
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/akindele214/gpu-scheduler/internal/config"
 	"github.com/akindele214/gpu-scheduler/pkg/types"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 )
 
 func GetGPUMemoryFromPod(pod *corev1.Pod) int {
@@ -103,13 +103,38 @@ func IsGPUPod(pod *corev1.Pod) bool {
 	if _, ok := pod.Annotations["gpu-scheduler.io/memory-mb"]; ok {
 		return true
 	}
+
+	if _, ok := pod.Annotations["gpu-scheduler/memory-mb"]; ok {
+		return true
+	}
+
+	if val, ok := pod.Annotations["gpu-scheduler/shared"]; ok && val == "true" {
+		return true
+	}
 	// Check resource request
 	for _, container := range pod.Spec.Containers {
-		if qty, ok := container.Resources.Requests[v1.ResourceName("nvidia.com/gpu")]; ok {
+		if qty, ok := container.Resources.Requests[corev1.ResourceName("nvidia.com/gpu")]; ok {
 			if !qty.IsZero() {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func IsSharedGPUPod(pod *corev1.Pod) bool {
+	value, exists := pod.Annotations["gpu-scheduler/shared"]
+	if exists {
+		return value == "true"
+	}
+	return false
+
+}
+
+func GetAssignedGPUS(pod *corev1.Pod) []string {
+	value, exists := pod.Annotations["gpu-scheduler/assigned-gpus"]
+	if exists {
+		return strings.Split(value, ",")
+	}
+	return []string{}
 }
