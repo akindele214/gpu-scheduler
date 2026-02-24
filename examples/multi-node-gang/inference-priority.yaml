@@ -1,0 +1,35 @@
+# inference-priority.yaml — High-priority pod that preempts the training gang
+# Apply AFTER training gang is running to trigger preemption
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inference-service
+  annotations:
+    gpu-scheduler/memory-mb: "6144"
+    gpu-scheduler/gpu-count: "2"
+    gpu-scheduler/memory-mode: "per-gpu"
+    gpu-scheduler/workflow: "build"
+    gpu-scheduler/priority: "95"
+spec:
+  schedulerName: gpu-scheduler
+  containers:
+  - name: inference
+    image: nvcr.io/nvidia/pytorch:24.01-py3
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        python -c "
+        import torch, time
+        devs = [torch.device(f'cuda:{i}') for i in range(torch.cuda.device_count())]
+        print(f'Inference service running on {len(devs)} GPUs')
+        for d in devs:
+            print(f'  {torch.cuda.get_device_name(d)}')
+            torch.randn(2048, 2048, device=d)
+        print('Model loaded. Serving requests...')
+        time.sleep(120)
+        print('Inference complete.')
+        "
+    resources:
+      limits:
+        nvidia.com/gpu: "2"
+  restartPolicy: Never

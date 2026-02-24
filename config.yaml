@@ -3,18 +3,26 @@ scheduler:
   port: 8888
   metricsPort: 9090
   mode: "standalone"
+  preemptionEnabled: true
+  checkpointTimeoutSeconds: 60
+  preemptionGracePeriod: 30
+
 queue:
   maxSize: 1000
   defaultPolicy: "fifo"
+
 gpu:
   pollIntervalSeconds: 5
-  mockMode: false
+  mockMode: true
+
 kubernetes:
   kubeconfig: "/etc/rancher/k3s/k3s.yaml"
   namespace: "default"
+
 logging:
   level: "info"
   format: "json"
+
 workflows:
   training:
     priority: 100

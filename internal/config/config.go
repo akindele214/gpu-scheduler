@@ -12,10 +12,14 @@ type Config struct {
 }
 
 type SchedulerConfig struct {
-	Name        string `mapstructure:"name"`
-	Port        int    `mapstructure:"port"`
-	MetricsPort int    `mapstructure:"metricsPort"`
-	Mode        string `mapstructure:"mode"`
+	Name                     string `mapstructure:"name"`
+	Port                     int    `mapstructure:"port"`
+	MetricsPort              int    `mapstructure:"metricsPort"`
+	Mode                     string `mapstructure:"mode"`
+	GangTimeoutSeconds       int    `mapstructure:"gangTimeoutSeconds"`
+	PreemptionEnabled        bool   `mapstructure:"preemptionEnabled"`
+	CheckpointTimeoutSeconds int    `mapstructure:"checkpointTimeoutSeconds"`
+	PreemptionGracePeriod    int    `mapstructure:"preemptionGracePeriod"`
 }
 
 type WorkFlowTypeConfig struct {

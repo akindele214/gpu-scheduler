@@ -334,3 +334,111 @@ func TestFIFO_ScheduleGang_PicksFirst_NotBestFit(t *testing.T) {
 		t.Errorf("expected FIFO to have total waste of 104000MB (first 2 GPUs), got %d", totalWaste)
 	}
 }
+
+// ── GPU sharing tests ────────────────────────────────────────────────────────
+
+func TestFIFO_Schedule_NonSharedJob_SkipsAllocatedGPU(t *testing.T) {
+	f := NewFIFOScheduler()
+	job := makeJob("test-job", 10000) // non-shared (default)
+
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeAllocatedGPU(80000, 10000, true, 1), // allocated — skip
+		}),
+		makeNode("node-2", []types.GPU{
+			makeAllocatedGPU(80000, 0, true, 0), // free
+		}),
+	}
+
+	result, err := f.Schedule(job, nodes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NodeName != "node-2" {
+		t.Errorf("expected non-shared job on 'node-2', got '%s'", result.NodeName)
+	}
+}
+
+func TestFIFO_Schedule_NonSharedJob_FailsWhenAllAllocated(t *testing.T) {
+	f := NewFIFOScheduler()
+	job := makeJob("test-job", 10000)
+
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeAllocatedGPU(80000, 10000, true, 1),
+		}),
+	}
+
+	_, err := f.Schedule(job, nodes)
+	if err == nil {
+		t.Error("expected error when all GPUs allocated and job is non-shared, got nil")
+	}
+}
+
+func TestFIFO_Schedule_SharedJob_UsesAllocatedGPU(t *testing.T) {
+	f := NewFIFOScheduler()
+	job := makeSharedJob("shared-job", 10000)
+
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeAllocatedGPU(80000, 10000, true, 1), // allocated but has memory
+		}),
+	}
+
+	result, err := f.Schedule(job, nodes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NodeName != "node-1" {
+		t.Errorf("expected shared job on 'node-1', got '%s'", result.NodeName)
+	}
+}
+
+func TestFIFO_ScheduleGang_NonSharedJob_SkipsAllocatedGPUs(t *testing.T) {
+	f := NewFIFOScheduler()
+	job := makeJob("gang-job", 8000)
+
+	// 3 GPUs, 1 allocated → only 2 eligible, need 3 → fail
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeAllocatedGPU(16000, 0, true, 0),
+			makeAllocatedGPU(16000, 8000, true, 1), // allocated
+			makeAllocatedGPU(16000, 0, true, 0),
+		}),
+	}
+
+	_, err := f.ScheduleGang(job, nodes, 3, types.MemoryPerGPU)
+	if err == nil {
+		t.Error("expected error when not enough unallocated GPUs for non-shared gang, got nil")
+	}
+
+	// 2 GPUs should work
+	result, err := f.ScheduleGang(job, nodes, 2, types.MemoryPerGPU)
+	if err != nil {
+		t.Fatalf("unexpected error for 2-GPU gang: %v", err)
+	}
+	if len(result.Placements) != 2 {
+		t.Errorf("expected 2 placements, got %d", len(result.Placements))
+	}
+}
+
+func TestFIFO_ScheduleGang_SharedJob_UsesAllocatedGPUs(t *testing.T) {
+	f := NewFIFOScheduler()
+	job := makeSharedJob("gang-job", 4000)
+
+	nodes := []types.NodeInfo{
+		makeNode("node-1", []types.GPU{
+			makeAllocatedGPU(16000, 4000, true, 1),
+			makeAllocatedGPU(16000, 4000, true, 1),
+			makeAllocatedGPU(16000, 4000, true, 1),
+		}),
+	}
+
+	result, err := f.ScheduleGang(job, nodes, 3, types.MemoryPerGPU)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Placements) != 3 {
+		t.Errorf("expected 3 placements, got %d", len(result.Placements))
+	}
+}

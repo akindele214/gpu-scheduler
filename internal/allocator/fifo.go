@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/akindele214/gpu-scheduler/pkg/types"
-	"github.com/google/uuid"
 )
 
 type FIFOScheduler struct{}
@@ -26,7 +25,7 @@ func (f *FIFOScheduler) Schedule(job *types.Job, nodes []types.NodeInfo) (*types
 
 	for _, node := range nodes {
 		for _, gpu := range node.GPUs {
-			if !gpu.IsHealthy {
+			if !gpu.IsHealthy || (!job.Shared && gpu.AllocatedPods > 0) {
 				continue
 			}
 			// Skip fully-used GPUs (count-based allocation)
@@ -37,7 +36,7 @@ func (f *FIFOScheduler) Schedule(job *types.Job, nodes []types.NodeInfo) (*types
 				return &types.SchedulingResult{
 					JobID:     job.ID,
 					NodeName:  node.Name,
-					GPUIDs:    []uuid.UUID{gpu.ID},
+					GPUIDs:    []string{gpu.ID},
 					Success:   true,
 					Timestamp: time.Now(),
 				}, nil
@@ -79,7 +78,7 @@ func (f *FIFOScheduler) ScheduleGang(job *types.Job, nodes []types.NodeInfo, gpu
 		}
 		gpuPlacements = []types.GPUPlacement{}
 		for _, gpu := range node.GPUs {
-			if !gpu.IsHealthy {
+			if !gpu.IsHealthy || (!job.Shared && gpu.AllocatedPods > 0) {
 				continue
 			}
 			// Skip fully-used GPUs (count-based allocation)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,17 +12,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/akindele214/gpu-scheduler/internal/agent"
 	"github.com/akindele214/gpu-scheduler/internal/allocator"
 	"github.com/akindele214/gpu-scheduler/internal/config"
 	"github.com/akindele214/gpu-scheduler/internal/gpu"
 	"github.com/akindele214/gpu-scheduler/internal/scheduler"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 func main() {
-	fmt.Println("HELLO WORLD")
+	fmt.Println("GPU Scheduler is starting")
 	s, err := NewScheduler()
 	if err != nil {
 		log.Fatalf("Failed to create scheduler: %v", err)
@@ -43,13 +46,15 @@ func main() {
 }
 
 type Scheduler struct {
-	config    *config.Config
-	manager   *gpu.Manager
-	allocator *allocator.Allocator
-	extender  *scheduler.Extender
-	watcher   *scheduler.Watcher
-	server    *http.Server
-	stopCh    chan struct{}
+	config        *config.Config
+	manager       *gpu.Manager
+	allocator     *allocator.Allocator
+	extender      *scheduler.Extender
+	registry      *gpu.Registry
+	watcher       *scheduler.Watcher
+	server        *http.Server
+	webhookServer *http.Server
+	stopCh        chan struct{}
 }
 
 func NewScheduler() (*Scheduler, error) {
@@ -60,7 +65,7 @@ func NewScheduler() (*Scheduler, error) {
 	}
 
 	// 2. Create K8s client first (needed for K8s discoverer)
-	kubeClient, err := buildKubeClient()
+	kubeClient, restConfig, err := buildKubeClient()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kube client: %w", err)
 	}
@@ -96,13 +101,14 @@ func NewScheduler() (*Scheduler, error) {
 		return nil, err
 	}
 
-	// 5. Create Allocator
-	alloc := allocator.NewAllocator(manager)
-
+	// 5. Create Registry and Allocator
+	registry := gpu.NewRegistry()
+	alloc := allocator.NewAllocator(manager, registry)
 	s := &Scheduler{
 		config:    cfg,
 		manager:   manager,
 		allocator: alloc,
+		registry:  registry,
 		stopCh:    make(chan struct{}),
 	}
 	// 6. Create Extender or Watcher based on mode
@@ -117,16 +123,50 @@ func NewScheduler() (*Scheduler, error) {
 		} else {
 			strategy = allocator.NewFIFOScheduler()
 		}
+		var preemptionOrch *scheduler.PreemptionOrchestrator
+		if cfg.Scheduler.PreemptionEnabled {
+			executor := scheduler.NewK8sExecutor(clientset, restConfig)
+			preemptionOrch = scheduler.NewPreemptionOrchestrator(
+				executor,
+				time.Duration(cfg.Scheduler.CheckpointTimeoutSeconds)*time.Second,
+				int64(cfg.Scheduler.PreemptionGracePeriod),
+			)
+			log.Println("Preemption enabled")
+		}
 
 		s.watcher = scheduler.NewWatcher(
 			clientset,
 			manager,
+			registry, // Pass registry for live agent data
 			strategy, // Pass the BinPacker
+			alloc,
 			cfg.Scheduler.Name,
 			cfg.GPU.PollIntervalSeconds,
 			cfg.Workflows,
+			*scheduler.NewGangCollector(time.Duration(cfg.Scheduler.GangTimeoutSeconds) * time.Second),
+			preemptionOrch,
+			s.stopCh,
 		)
 		log.Println("Running in STANDALONE mode")
+		mux := http.NewServeMux()
+		s.registerGPUReportEndpoint(mux)
+		mux.Handle("/metrics", promhttp.Handler())
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		s.server = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.Scheduler.Port),
+			Handler: mux,
+		}
+
+		// Webhook HTTPS server (for mutating admission webhook)
+		webhookMux := http.NewServeMux()
+		webhookMux.HandleFunc("/mutate", scheduler.HandleMutate)
+		s.webhookServer = &http.Server{
+			Addr:    ":8443",
+			Handler: webhookMux,
+		}
 
 	} else {
 		// Extender mode
@@ -135,7 +175,8 @@ func NewScheduler() (*Scheduler, error) {
 		// Create HTTP server
 		mux := http.NewServeMux()
 		ext.RegisterRoutes(mux)
-
+		s.registerGPUReportEndpoint(mux)
+		mux.Handle("/metrics", promhttp.Handler())
 		s.server = &http.Server{
 			Addr:    fmt.Sprintf(":%d", cfg.Scheduler.Port),
 			Handler: mux,
@@ -153,6 +194,26 @@ func (s *Scheduler) Run() error {
 
 	if s.config.Scheduler.Mode == "standalone" {
 		log.Println("Starting GPU scheduler in STANDALONE mode (watcher)")
+		go func() {
+			log.Printf("Starting HTTP server on port %d for GPU agent reports", s.config.Scheduler.Port)
+			if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("HTTP server error: %v", err)
+			}
+		}()
+		// Start webhook HTTPS server if certs exist
+		certFile := "certs/tls.crt"
+		keyFile := "certs/tls.key"
+		if _, err := os.Stat(certFile); err == nil {
+			go func() {
+				log.Printf("Starting webhook HTTPS server on :8443")
+				if err := s.webhookServer.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+					log.Printf("Webhook server error: %v", err)
+				}
+			}()
+		} else {
+			log.Println("No certs/tls.crt found, webhook server disabled")
+		}
+
 		s.watcher.Run() // This blocks
 		return nil
 	}
@@ -174,6 +235,12 @@ func (s *Scheduler) Stop() {
 		defer cancel()
 		s.server.Shutdown(ctx)
 	}
+	if s.webhookServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.webhookServer.Shutdown(ctx)
+	}
+
 }
 
 func (s *Scheduler) refreshLoop() {
@@ -191,11 +258,44 @@ func (s *Scheduler) refreshLoop() {
 		}
 	}
 }
-func buildKubeClient() (kubernetes.Interface, error) {
+func (s *Scheduler) registerGPUReportEndpoint(mux *http.ServeMux) {
+	mux.HandleFunc("/api/v1/gpu-report", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var report agent.GPUReport
+		if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+			http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		s.registry.UpdateFromReport(&report)
+
+		// Log detailed GPU state with both actual and reserved memory
+		var totalMem, usedMem, reservedMem int
+		for _, gpu := range report.GPUs {
+			totalMem += gpu.TotalMemoryMB
+			usedMem += gpu.UsedMemoryMB
+			reservedMem += s.registry.GetReservedMemory(report.NodeName, gpu.UUID)
+		}
+		log.Printf("[REPORT] Node %s: %d GPU(s), actual=%d MB, reserved=%d MB, total=%d MB (%.1f%% actual, %.1f%% reserved), MIG=%v",
+			report.NodeName, len(report.GPUs), usedMem, reservedMem, totalMem,
+			float64(usedMem)/float64(totalMem)*100,
+			float64(reservedMem)/float64(totalMem)*100,
+			len(report.GPUs) > 0 && report.GPUs[0].MIGEnabled)
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+}
+func buildKubeClient() (kubernetes.Interface, *rest.Config, error) {
 	// Try in-cluster config first (when running in K8s)
 	cfg, err := rest.InClusterConfig()
 	if err == nil {
-		return kubernetes.NewForConfig(cfg)
+		client, err := kubernetes.NewForConfig(cfg)
+		return client, cfg, err
 	}
 
 	// Try kubeconfig file (for local dev with cluster)
@@ -205,12 +305,13 @@ func buildKubeClient() (kubernetes.Interface, error) {
 		if _, err := os.Stat(kubeConfigPath); err == nil {
 			cfg, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
 			if err == nil {
-				return kubernetes.NewForConfig(cfg)
+				client, err := kubernetes.NewForConfig(cfg)
+				return client, cfg, err
 			}
 		}
 	}
 
 	// No cluster available — return nil client for local testing
 	log.Println("Warning: No Kubernetes cluster available. Running in standalone mode.")
-	return nil, nil
+	return nil, nil, nil
 }
