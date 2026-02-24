@@ -95,4 +95,5 @@ type SchedulingResult struct {
 	Success   bool
 	Reason    string
 	Timestamp time.Time
+	IsMIG     bool
 }

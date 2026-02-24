@@ -21,10 +21,15 @@ type Registry struct {
 	podCountPerGPU map[string]map[string]int
 }
 
-type PodAllocation struct {
+type AllocationEntry struct {
 	NodeName string
 	GPUUUID  string
 	MemoryMB int
+	IsMIG    bool
+}
+
+type PodAllocation struct {
+	Entries []AllocationEntry
 }
 
 type NodeGPUs struct {
@@ -94,6 +99,7 @@ type MIGCandidate struct {
 	ProfileName string
 	MemoryMB    int
 	SMCount     int
+	PodCount    int
 }
 type GPUCandidate struct {
 	NodeName      string
@@ -101,6 +107,7 @@ type GPUCandidate struct {
 	GPUModel      string
 	FreeMemoryMB  int
 	TotalMemoryMB int
+	PodCount      int
 }
 
 func (r *Registry) FindAvailableMIG(minMemoryMB int) []MIGCandidate {
@@ -113,6 +120,10 @@ func (r *Registry) FindAvailableMIG(minMemoryMB int) []MIGCandidate {
 			if gpu.MIGEnabled && gpu.IsHealthy {
 				for _, migGPU := range gpu.MIGInstances {
 					if migGPU.IsAvailable && migGPU.MemoryMB >= minMemoryMB {
+						podCount := 0
+						if r.podCountPerGPU[nodeName] != nil {
+							podCount = r.podCountPerGPU[nodeName][gpu.UUID]
+						}
 						candidates = append(candidates, MIGCandidate{
 							NodeName:    nodeName,
 							GPUUUID:     gpu.UUID,
@@ -120,6 +131,7 @@ func (r *Registry) FindAvailableMIG(minMemoryMB int) []MIGCandidate {
 							ProfileName: migGPU.ProfileName,
 							MemoryMB:    migGPU.MemoryMB,
 							SMCount:     migGPU.SMCount,
+							PodCount:    podCount,
 						})
 					}
 				}
@@ -135,17 +147,31 @@ func (r *Registry) FindAvailableFullGPU(minMemoryMB int) []GPUCandidate {
 
 	candidates := []GPUCandidate{}
 	for nodeName, node := range r.nodes {
+		nodeReservations := r.reservations[nodeName]
 		for _, gpu := range node.GPUs {
-			if gpu.MIGEnabled || !gpu.IsHealthy || gpu.FreeMemoryMB < minMemoryMB {
+			if gpu.MIGEnabled || !gpu.IsHealthy {
 				continue
 			}
 
+			// Subtract scheduler reservations from agent-reported free memory
+			freeMB := gpu.FreeMemoryMB
+			if nodeReservations != nil {
+				freeMB -= nodeReservations[gpu.UUID]
+			}
+			if freeMB < minMemoryMB {
+				continue
+			}
+			podCount := 0
+			if r.podCountPerGPU[nodeName] != nil {
+				podCount = r.podCountPerGPU[nodeName][gpu.UUID]
+			}
 			candidates = append(candidates, GPUCandidate{
 				NodeName:      nodeName,
 				GPUUUID:       gpu.UUID,
 				GPUModel:      gpu.Name,
-				FreeMemoryMB:  gpu.FreeMemoryMB,
+				FreeMemoryMB:  freeMB,
 				TotalMemoryMB: gpu.TotalMemoryMB,
+				PodCount:      podCount,
 			})
 		}
 	}
@@ -189,16 +215,55 @@ func (r *Registry) MarkGPUAllocatedForPod(nodeName, gpuUUID string, memoryMB int
 	r.reservations[nodeName][gpuUUID] += memoryMB
 	r.podCountPerGPU[nodeName][gpuUUID] += 1
 	// Track pod allocation for release on pod completion
-	r.podAllocations[podKey] = &PodAllocation{
+	alloc := r.podAllocations[podKey]
+	if alloc == nil {
+		alloc = &PodAllocation{}
+		r.podAllocations[podKey] = alloc
+	}
+	alloc.Entries = append(alloc.Entries, AllocationEntry{
 		NodeName: nodeName,
 		GPUUUID:  gpuUUID,
 		MemoryMB: memoryMB,
-	}
+	})
 
 	totalReserved := r.reservations[nodeName][gpuUUID]
 	metrics.GPUReservedMemoryMB.WithLabelValues(nodeName, gpuUUID).Set(float64(totalReserved))
 	log.Printf("[ALLOC] Pod %s: reserved %d MB on GPU %s (total reserved: %d MB)",
 		podKey, memoryMB, gpuUUID[:12], totalReserved)
+}
+
+// MarkMIGAllocatedForPod marks a MIG instance unavailable and tracks the pod allocation
+func (r *Registry) MarkMIGAllocatedForPod(nodeName, migUUID string, memoryMB int, namespace, podName string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	podKey := namespace + "/" + podName
+
+	// Mark MIG instance as unavailable
+	if node, exists := r.nodes[nodeName]; exists {
+		for i := range node.GPUs {
+			for j := range node.GPUs[i].MIGInstances {
+				if node.GPUs[i].MIGInstances[j].UUID == migUUID {
+					node.GPUs[i].MIGInstances[j].IsAvailable = false
+				}
+			}
+		}
+	}
+
+	// Track pod allocation for release
+	alloc := r.podAllocations[podKey]
+	if alloc == nil {
+		alloc = &PodAllocation{}
+		r.podAllocations[podKey] = alloc
+	}
+	alloc.Entries = append(alloc.Entries, AllocationEntry{
+		NodeName: nodeName,
+		GPUUUID:  migUUID,
+		MemoryMB: memoryMB,
+		IsMIG:    true,
+	})
+
+	log.Printf("[ALLOC] Pod %s: reserved MIG %s on node %s", podKey, migUUID[:12], nodeName)
 }
 
 // ReleasePod releases GPU memory reservation when a pod completes or is deleted
@@ -209,25 +274,41 @@ func (r *Registry) ReleasePod(namespace, podName string) {
 	podKey := namespace + "/" + podName
 	alloc, exists := r.podAllocations[podKey]
 	if !exists {
-		return // Pod wasn't tracked (maybe scheduled before restart)
+		return
 	}
 
-	// Release reservation
-	if r.reservations[alloc.NodeName] != nil {
-		r.reservations[alloc.NodeName][alloc.GPUUUID] -= alloc.MemoryMB
-		r.podCountPerGPU[alloc.NodeName][alloc.GPUUUID] -= 1
-		if r.reservations[alloc.NodeName][alloc.GPUUUID] < 0 {
-			r.reservations[alloc.NodeName][alloc.GPUUUID] = 0
-			r.podCountPerGPU[alloc.NodeName][alloc.GPUUUID] = 0
-			metrics.GPUReservedMemoryMB.WithLabelValues(alloc.NodeName, alloc.GPUUUID).Set(float64(0))
+	for _, entry := range alloc.Entries {
+		if entry.IsMIG {
+			// Release MIG instance
+			if node, exists := r.nodes[entry.NodeName]; exists {
+				for i := range node.GPUs {
+					for j := range node.GPUs[i].MIGInstances {
+						if node.GPUs[i].MIGInstances[j].UUID == entry.GPUUUID {
+							node.GPUs[i].MIGInstances[j].IsAvailable = true
+						}
+					}
+				}
+			}
+			log.Printf("[RELEASE] Pod %s: released MIG %s on node %s",
+				podKey, entry.GPUUUID[:12], entry.NodeName)
 		} else {
-			metrics.GPUReservedMemoryMB.WithLabelValues(alloc.NodeName, alloc.GPUUUID).Set(float64(r.reservations[alloc.NodeName][alloc.GPUUUID]))
+			// Release full GPU reservation
+			if r.reservations[entry.NodeName] != nil {
+				r.reservations[entry.NodeName][entry.GPUUUID] -= entry.MemoryMB
+				r.podCountPerGPU[entry.NodeName][entry.GPUUUID] -= 1
+				if r.reservations[entry.NodeName][entry.GPUUUID] < 0 {
+					r.reservations[entry.NodeName][entry.GPUUUID] = 0
+					r.podCountPerGPU[entry.NodeName][entry.GPUUUID] = 0
+				}
+				metrics.GPUReservedMemoryMB.WithLabelValues(entry.NodeName, entry.GPUUUID).Set(
+					float64(r.reservations[entry.NodeName][entry.GPUUUID]))
+			}
+			log.Printf("[RELEASE] Pod %s: released %d MB on GPU %s",
+				podKey, entry.MemoryMB, entry.GPUUUID[:12])
 		}
 	}
 
 	delete(r.podAllocations, podKey)
-	log.Printf("[RELEASE] Pod %s: released %d MB on GPU %s",
-		podKey, alloc.MemoryMB, alloc.GPUUUID[:12])
 }
 
 // GetReservedMemory returns total reserved memory for a GPU

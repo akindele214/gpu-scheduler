@@ -88,13 +88,18 @@ func extractGPUMemoryRequest(pod *v1.Pod) int {
 }
 
 // SelectBestMIG picks the smallest MIG instance that fits (best-fit bin packing)
-func SelectBestMIG(candidates []gpu.MIGCandidate) *gpu.MIGCandidate {
+func SelectBestMIG(candidates []gpu.MIGCandidate, preferShared bool) *gpu.MIGCandidate {
 	if len(candidates) == 0 {
 		return nil
 	}
 
-	// Sort by memory ascending (smallest first)
 	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].MemoryMB == candidates[j].MemoryMB {
+			if preferShared {
+				return candidates[i].PodCount > candidates[j].PodCount
+			}
+			return candidates[i].PodCount < candidates[j].PodCount
+		}
 		return candidates[i].MemoryMB < candidates[j].MemoryMB
 	})
 
@@ -102,13 +107,18 @@ func SelectBestMIG(candidates []gpu.MIGCandidate) *gpu.MIGCandidate {
 }
 
 // SelectBestFullGPU picks the GPU with least free memory that still fits (best-fit bin packing)
-func SelectBestFullGPU(candidates []gpu.GPUCandidate) *gpu.GPUCandidate {
+func SelectBestFullGPU(candidates []gpu.GPUCandidate, preferShared bool) *gpu.GPUCandidate {
 	if len(candidates) == 0 {
 		return nil
 	}
 
-	// Sort by free memory ascending (tightest fit first)
 	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].FreeMemoryMB == candidates[j].FreeMemoryMB {
+			if preferShared {
+				return candidates[i].PodCount > candidates[j].PodCount
+			}
+			return candidates[i].PodCount < candidates[j].PodCount
+		}
 		return candidates[i].FreeMemoryMB < candidates[j].FreeMemoryMB
 	})
 

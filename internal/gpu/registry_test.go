@@ -370,6 +370,49 @@ func TestRegistry_AllocatedPods_ZeroAfterFullRelease(t *testing.T) {
 	}
 }
 
+// ── multi-GPU pod tests (PodAllocation bug fix) ─────────────────────────────
+
+func TestRegistry_MultiGPUPod_BothGPUsFreedOnRelease(t *testing.T) {
+	r := NewRegistry()
+	r.UpdateFromReport(makeReport("node-1", []agent.GPUInfo{
+		makeGPUInfo("GPU-AAAA-1111-2222", 81920, true),
+		makeGPUInfo("GPU-BBBB-3333-4444", 40960, true),
+	}))
+
+	// Single pod requests 2 GPUs (like a multi-GPU training job)
+	r.MarkGPUAllocatedForPod("node-1", "GPU-AAAA-1111-2222", 30000, "default", "multi-gpu-pod")
+	r.MarkGPUAllocatedForPod("node-1", "GPU-BBBB-3333-4444", 30000, "default", "multi-gpu-pod")
+
+	// Both GPUs should have reservations
+	if got := r.GetReservedMemory("node-1", "GPU-AAAA-1111-2222"); got != 30000 {
+		t.Errorf("GPU-A: expected 30000 MB reserved, got %d", got)
+	}
+	if got := r.GetReservedMemory("node-1", "GPU-BBBB-3333-4444"); got != 30000 {
+		t.Errorf("GPU-B: expected 30000 MB reserved, got %d", got)
+	}
+
+	// Release the pod — BOTH GPUs must be freed
+	r.ReleasePod("default", "multi-gpu-pod")
+
+	if got := r.GetReservedMemory("node-1", "GPU-AAAA-1111-2222"); got != 0 {
+		t.Errorf("GPU-A: expected 0 MB after release, got %d (bug: only last GPU was tracked)", got)
+	}
+	if got := r.GetReservedMemory("node-1", "GPU-BBBB-3333-4444"); got != 0 {
+		t.Errorf("GPU-B: expected 0 MB after release, got %d", got)
+	}
+
+	// Pod counts should also be back to 0
+	nodes := r.GetNodes()
+	gpuA := findGPU(nodes, "GPU-AAAA-1111-2222")
+	gpuB := findGPU(nodes, "GPU-BBBB-3333-4444")
+	if gpuA.AllocatedPods != 0 {
+		t.Errorf("GPU-A: expected AllocatedPods 0 after release, got %d", gpuA.AllocatedPods)
+	}
+	if gpuB.AllocatedPods != 0 {
+		t.Errorf("GPU-B: expected AllocatedPods 0 after release, got %d", gpuB.AllocatedPods)
+	}
+}
+
 func TestRegistry_AllocatedPods_IndependentPerGPU(t *testing.T) {
 	r := NewRegistry()
 	r.UpdateFromReport(makeReport("node-1", []agent.GPUInfo{

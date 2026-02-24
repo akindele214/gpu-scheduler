@@ -207,6 +207,22 @@ func buildSharedGPUPatches(pod *corev1.Pod) []patchOp {
 			})
 		}
 	}
+	// 4. Remove nvidia.com/gpu resource limits and requests
+	// so the device plugin doesn't block shared pods
+	for i, c := range pod.Spec.Containers {
+		if _, ok := c.Resources.Limits[corev1.ResourceName("nvidia.com/gpu")]; ok {
+			patches = append(patches, patchOp{
+				Op:   "remove",
+				Path: fmt.Sprintf("/spec/containers/%d/resources/limits/nvidia.com~1gpu", i),
+			})
+		}
+		if _, ok := c.Resources.Requests[corev1.ResourceName("nvidia.com/gpu")]; ok {
+			patches = append(patches, patchOp{
+				Op:   "remove",
+				Path: fmt.Sprintf("/spec/containers/%d/resources/requests/nvidia.com~1gpu", i),
+			})
+		}
+	}
 
 	return patches
 }

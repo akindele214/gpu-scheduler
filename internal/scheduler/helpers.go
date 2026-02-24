@@ -138,3 +138,43 @@ func GetAssignedGPUS(pod *corev1.Pod) []string {
 	}
 	return []string{}
 }
+
+// Gang scheduling helpers
+func GetGangIDFromPod(pod *corev1.Pod) string {
+	return pod.Annotations["gpu-scheduler/gang-id"]
+}
+
+func GetGangSizeFromPod(pod *corev1.Pod) int {
+	value, exists := pod.Annotations["gpu-scheduler/gang-size"]
+	if exists {
+		size, err := strconv.Atoi(value)
+		if err == nil && size > 0 {
+			return size
+		}
+	}
+	return 0
+}
+
+// Preemption helpers
+func GetCheckpointCmdFromPod(pod *corev1.Pod) string {
+	return pod.Annotations["gpu-scheduler/checkpoint-cmd"]
+}
+
+func GetResumeCmdFromPod(pod *corev1.Pod) string {
+	return pod.Annotations["gpu-scheduler/resume-cmd"]
+}
+
+func IsPreemptible(pod *corev1.Pod, workflowCfg config.WorkflowConfig) bool {
+	// Explicit annotation overrides workflow config
+	if value, exists := pod.Annotations["gpu-scheduler/preemptible"]; exists {
+		return value == "true"
+	}
+	// Fall back to workflow config's Preemptible field
+	workflow := GetWorkflowFromPod(pod)
+	for _, wf := range workflowCfg.Types {
+		if wf.Name == string(workflow) {
+			return wf.Preemptible
+		}
+	}
+	return false
+}

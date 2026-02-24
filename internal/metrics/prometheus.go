@@ -72,4 +72,23 @@ var (
 			Buckets:   prometheus.DefBuckets, // or custom: []float64{0.01, 0.05, 0.1, 0.5, 1, 5}
 		},
 	)
+	GangSchedulingAttempts = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gpu_scheduler",
+			Subsystem: "gang",
+			Name:      "scheduling_attempts_total",
+			Help:      "Total number of gang scheduling attempts.",
+		},
+		[]string{"gang_id", "result"}, // result: "success", "timeout", "failed"
+	)
+
+	PreemptionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gpu_scheduler",
+			Subsystem: "preemption",
+			Name:      "evictions_total",
+			Help:      "Total number of pods preempted.",
+		},
+		[]string{"reason"}, // reason: "priority", "resource_pressure"
+	)
 )

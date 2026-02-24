@@ -22,6 +22,11 @@ func Load() (*Config, error) {
 	viper.SetDefault("kubernetes.namespace", "default")
 	viper.SetDefault("logging.level", "info")
 	viper.SetDefault("logging.format", "json")
+	viper.SetDefault("scheduler.gangTimeoutSeconds", 300)
+	viper.SetDefault("scheduler.preemptionEnabled", false)
+	viper.SetDefault("scheduler.checkpointTimeoutSeconds", 60)
+	viper.SetDefault("scheduler.preemptionGracePeriod", 30)
+
 	// Set up viper to read the config.yaml file
 	viper.SetConfigName("config") // Config file name without extension
 	viper.SetConfigType("yaml")   // Config file type

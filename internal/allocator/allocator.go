@@ -51,6 +51,8 @@ func (a *Allocator) AllocateWithRouting(pod *v1.Pod, job *types.Job) (*types.Sch
 	}
 
 	// Determine which pool to try first
+	isShared := pod.Annotations["gpu-scheduler/shared"] == "true"
+
 	preferredPool := classification.Pool
 	if preferredPool == PoolAuto {
 		// Auto-route: prefer MIG for jobs that fit
@@ -58,7 +60,7 @@ func (a *Allocator) AllocateWithRouting(pod *v1.Pod, job *types.Job) (*types.Sch
 	}
 
 	// Try preferred pool first
-	result, err := a.tryPool(preferredPool, memoryMB, job)
+	result, err := a.tryPool(preferredPool, memoryMB, job, isShared)
 	if err == nil {
 		return result, nil
 	}
@@ -70,7 +72,7 @@ func (a *Allocator) AllocateWithRouting(pod *v1.Pod, job *types.Job) (*types.Sch
 
 	// Try fallback pool
 	fallbackPool := a.getOtherPool(preferredPool)
-	result, err = a.tryPool(fallbackPool, memoryMB, job)
+	result, err = a.tryPool(fallbackPool, memoryMB, job, isShared)
 	if err != nil {
 		return nil, fmt.Errorf("no capacity in any pool: %w", err)
 	}
@@ -89,31 +91,31 @@ func (a *Allocator) autoSelectPool(memoryMB int) PoolPreference {
 }
 
 // tryPool attempts to allocate from the specified pool
-func (a *Allocator) tryPool(pool PoolPreference, memoryMB int, job *types.Job) (*types.SchedulingResult, error) {
+func (a *Allocator) tryPool(pool PoolPreference, memoryMB int, job *types.Job, isShared bool) (*types.SchedulingResult, error) {
 	switch pool {
 	case PoolMIG:
-		return a.allocateFromMIG(memoryMB, job)
+		return a.allocateFromMIG(memoryMB, job, isShared)
 	case PoolFull:
-		return a.allocateFromFullGPU(memoryMB, job)
+		return a.allocateFromFullGPU(memoryMB, job, isShared)
 	default:
 		return nil, fmt.Errorf("unknown pool: %s", pool)
 	}
 }
 
 // allocateFromMIG finds and allocates a MIG instance
-func (a *Allocator) allocateFromMIG(memoryMB int, job *types.Job) (*types.SchedulingResult, error) {
+func (a *Allocator) allocateFromMIG(memoryMB int, job *types.Job, isShared bool) (*types.SchedulingResult, error) {
 	candidates := a.registry.FindAvailableMIG(memoryMB)
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no available MIG instances with %dMB", memoryMB)
 	}
 
-	best := SelectBestMIG(candidates)
+	best := SelectBestMIG(candidates, isShared)
 	if best == nil {
 		return nil, fmt.Errorf("failed to select MIG instance")
 	}
 
 	// Mark MIG instance as unavailable immediately (O(1) lookup)
-	a.registry.MarkMIGAllocated(best.NodeName, best.MIGUUID)
+	// a.registry.MarkMIGAllocated(best.NodeName, best.MIGUUID)
 
 	return &types.SchedulingResult{
 		JobID:     job.ID,
@@ -122,23 +124,24 @@ func (a *Allocator) allocateFromMIG(memoryMB int, job *types.Job) (*types.Schedu
 		Success:   true,
 		Reason:    fmt.Sprintf("Allocated MIG %s (%s)", best.ProfileName, best.MIGUUID),
 		Timestamp: time.Now(),
+		IsMIG:     true,
 	}, nil
 }
 
 // allocateFromFullGPU finds and allocates a full GPU
-func (a *Allocator) allocateFromFullGPU(memoryMB int, job *types.Job) (*types.SchedulingResult, error) {
+func (a *Allocator) allocateFromFullGPU(memoryMB int, job *types.Job, isShared bool) (*types.SchedulingResult, error) {
 	candidates := a.registry.FindAvailableFullGPU(memoryMB)
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no available full GPUs with %dMB free", memoryMB)
 	}
 
-	best := SelectBestFullGPU(candidates)
+	best := SelectBestFullGPU(candidates, isShared)
 	if best == nil {
 		return nil, fmt.Errorf("failed to select full GPU")
 	}
 
 	// Update used memory on the GPU immediately (O(1) lookup)
-	a.registry.MarkGPUAllocated(best.NodeName, best.GPUUUID, memoryMB)
+	// a.registry.MarkGPUAllocated(best.NodeName, best.GPUUUID, memoryMB)
 
 	return &types.SchedulingResult{
 		JobID:     job.ID,
@@ -147,6 +150,7 @@ func (a *Allocator) allocateFromFullGPU(memoryMB int, job *types.Job) (*types.Sc
 		Success:   true,
 		Reason:    fmt.Sprintf("Allocated full GPU %s (%s)", best.GPUModel, best.GPUUUID),
 		Timestamp: time.Now(),
+		IsMIG:     false,
 	}, nil
 }
 

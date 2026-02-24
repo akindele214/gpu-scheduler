@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-gpu-1
+  annotations:
+    gpu-scheduler/memory-mb: "2048"
+    gpu-scheduler/shared: "true"
+spec:
+  schedulerName: gpu-scheduler
+  containers:
+  - name: gpu-worker
+    image: nvcr.io/nvidia/cuda:12.0.0-devel-ubuntu22.04
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        cat <<'CUDA' > /tmp/alloc.cu
+        #include <stdio.h>
+        #include <unistd.h>
+        #include <cuda_runtime.h>
+        int main() {
+            size_t bytes = 1ULL * 1024 * 1024 * 1024;
+            void *ptr;
+            cudaError_t err = cudaMalloc(&ptr, bytes);
+            if (err != cudaSuccess) { printf("cudaMalloc failed: %s\n", cudaGetErrorString(err)); return 1; }
+            printf("shared-gpu-1: Allocated 1GB. Holding 180s...\n");
+            sleep(180);
+            cudaFree(ptr);
+            return 0;
+        }
+        CUDA
+        nvcc /tmp/alloc.cu -o /tmp/alloc && /tmp/alloc
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-gpu-2
+  annotations:
+    gpu-scheduler/memory-mb: "2048"
+    gpu-scheduler/shared: "true"
+spec:
+  schedulerName: gpu-scheduler
+  containers:
+  - name: gpu-worker
+    image: nvcr.io/nvidia/cuda:12.0.0-devel-ubuntu22.04
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        cat <<'CUDA' > /tmp/alloc.cu
+        #include <stdio.h>
+        #include <unistd.h>
+        #include <cuda_runtime.h>
+        int main() {
+            size_t bytes = 1ULL * 1024 * 1024 * 1024;
+            void *ptr;
+            cudaError_t err = cudaMalloc(&ptr, bytes);
+            if (err != cudaSuccess) { printf("cudaMalloc failed: %s\n", cudaGetErrorString(err)); return 1; }
+            printf("shared-gpu-2: Allocated 1GB. Holding 180s...\n");
+            sleep(180);
+            cudaFree(ptr);
+            return 0;
+        }
+        CUDA
+        nvcc /tmp/alloc.cu -o /tmp/alloc && /tmp/alloc
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+  restartPolicy: Never

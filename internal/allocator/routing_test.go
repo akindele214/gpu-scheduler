@@ -164,7 +164,7 @@ func TestSelectBestMIG_BinPack(t *testing.T) {
 		{NodeName: "node1", MIGUUID: "mig-medium", ProfileName: "2g.10gb", MemoryMB: 10240},
 	}
 
-	best := SelectBestMIG(candidates)
+	best := SelectBestMIG(candidates, false)
 
 	if best == nil {
 		t.Fatal("Expected a candidate, got nil")
@@ -181,7 +181,7 @@ func TestSelectBestFullGPU_BinPack(t *testing.T) {
 		{NodeName: "node1", GPUUUID: "gpu-3", FreeMemoryMB: 30720},
 	}
 
-	best := SelectBestFullGPU(candidates)
+	best := SelectBestFullGPU(candidates, false)
 
 	if best == nil {
 		t.Fatal("Expected a candidate, got nil")
@@ -215,6 +215,9 @@ func TestAllocateWithRouting_SmallJobRoutesMIG(t *testing.T) {
 	if result.Reason == "" || result.Reason[:13] != "Allocated MIG" {
 		t.Errorf("Expected MIG allocation, got: %s", result.Reason)
 	}
+	if !result.IsMIG {
+		t.Error("Expected IsMIG=true for MIG allocation")
+	}
 }
 
 func TestAllocateWithRouting_LargeJobRoutesFullGPU(t *testing.T) {
@@ -237,6 +240,9 @@ func TestAllocateWithRouting_LargeJobRoutesFullGPU(t *testing.T) {
 	// Should have allocated a full GPU
 	if result.Reason == "" || result.Reason[:18] != "Allocated full GPU" {
 		t.Errorf("Expected full GPU allocation, got: %s", result.Reason)
+	}
+	if result.IsMIG {
+		t.Error("Expected IsMIG=false for full GPU allocation")
 	}
 }
 
@@ -324,7 +330,7 @@ func TestMarkMIGAllocated_UpdatesAvailability(t *testing.T) {
 	}
 }
 
-func TestMarkGPUAllocated_UpdatesFreeMemory(t *testing.T) {
+func TestMarkGPUAllocatedForPod_UpdatesReservation(t *testing.T) {
 	registry := setupTestRegistry()
 
 	// Before allocation
@@ -333,8 +339,8 @@ func TestMarkGPUAllocated_UpdatesFreeMemory(t *testing.T) {
 		t.Fatalf("Expected 1 full GPU candidate, got %d", len(candidates))
 	}
 
-	// Allocate 30000MB
-	registry.MarkGPUAllocated("test-node", "00000000-0000-0000-0000-000000000001", 30000)
+	// Allocate 30000MB for a pod
+	registry.MarkGPUAllocatedForPod("test-node", "00000000-0000-0000-0000-000000000001", 30000, "default", "test-pod")
 
 	// Should still have 10960MB free, but not enough for 40000MB request
 	candidates = registry.FindAvailableFullGPU(40000)
@@ -346,5 +352,104 @@ func TestMarkGPUAllocated_UpdatesFreeMemory(t *testing.T) {
 	candidates = registry.FindAvailableFullGPU(10000)
 	if len(candidates) != 1 {
 		t.Errorf("Expected 1 candidate for 10000MB request, got %d", len(candidates))
+	}
+
+	// Release the pod — should restore capacity
+	registry.ReleasePod("default", "test-pod")
+
+	candidates = registry.FindAvailableFullGPU(40000)
+	if len(candidates) != 1 {
+		t.Errorf("Expected 1 candidate after release, got %d", len(candidates))
+	}
+}
+
+func TestMarkMIGAllocatedForPod_AndRelease(t *testing.T) {
+	registry := setupTestRegistry()
+
+	// Before allocation
+	candidates := registry.FindAvailableMIG(1000)
+	if len(candidates) != 2 {
+		t.Fatalf("Expected 2 MIG candidates, got %d", len(candidates))
+	}
+
+	// Allocate MIG for a pod
+	registry.MarkMIGAllocatedForPod("test-node", "11111111-1111-1111-1111-111111111111", 4864, "default", "mig-pod")
+
+	// Should have 1 MIG left
+	candidates = registry.FindAvailableMIG(1000)
+	if len(candidates) != 1 {
+		t.Errorf("Expected 1 MIG candidate after allocation, got %d", len(candidates))
+	}
+
+	// Release the pod — should restore MIG availability
+	registry.ReleasePod("default", "mig-pod")
+
+	candidates = registry.FindAvailableMIG(1000)
+	if len(candidates) != 2 {
+		t.Errorf("Expected 2 MIG candidates after release, got %d", len(candidates))
+	}
+}
+
+func TestSelectBestFullGPU_ExclusivePrefersFewerPods(t *testing.T) {
+	candidates := []gpu.GPUCandidate{
+		{NodeName: "node1", GPUUUID: "gpu-1", FreeMemoryMB: 20000, PodCount: 3},
+		{NodeName: "node1", GPUUUID: "gpu-2", FreeMemoryMB: 20000, PodCount: 0},
+	}
+
+	best := SelectBestFullGPU(candidates, false)
+
+	if best == nil {
+		t.Fatal("Expected a candidate, got nil")
+	}
+	if best.GPUUUID != "gpu-2" {
+		t.Errorf("Exclusive pod should prefer fewer pods (gpu-2), got %s", best.GPUUUID)
+	}
+}
+
+func TestSelectBestFullGPU_SharedPrefersMorePods(t *testing.T) {
+	candidates := []gpu.GPUCandidate{
+		{NodeName: "node1", GPUUUID: "gpu-1", FreeMemoryMB: 20000, PodCount: 3},
+		{NodeName: "node1", GPUUUID: "gpu-2", FreeMemoryMB: 20000, PodCount: 0},
+	}
+
+	best := SelectBestFullGPU(candidates, true)
+
+	if best == nil {
+		t.Fatal("Expected a candidate, got nil")
+	}
+	if best.GPUUUID != "gpu-1" {
+		t.Errorf("Shared pod should prefer more pods (gpu-1), got %s", best.GPUUUID)
+	}
+}
+
+func TestSelectBestMIG_ExclusivePrefersFewerPods(t *testing.T) {
+	candidates := []gpu.MIGCandidate{
+		{NodeName: "node1", MIGUUID: "mig-1", ProfileName: "1g.5gb", MemoryMB: 4864, PodCount: 2},
+		{NodeName: "node1", MIGUUID: "mig-2", ProfileName: "1g.5gb", MemoryMB: 4864, PodCount: 0},
+	}
+
+	best := SelectBestMIG(candidates, false)
+
+	if best == nil {
+		t.Fatal("Expected a candidate, got nil")
+	}
+	if best.MIGUUID != "mig-2" {
+		t.Errorf("Exclusive pod should prefer fewer pods (mig-2), got %s", best.MIGUUID)
+	}
+}
+
+func TestSelectBestMIG_SharedPrefersMorePods(t *testing.T) {
+	candidates := []gpu.MIGCandidate{
+		{NodeName: "node1", MIGUUID: "mig-1", ProfileName: "1g.5gb", MemoryMB: 4864, PodCount: 2},
+		{NodeName: "node1", MIGUUID: "mig-2", ProfileName: "1g.5gb", MemoryMB: 4864, PodCount: 0},
+	}
+
+	best := SelectBestMIG(candidates, true)
+
+	if best == nil {
+		t.Fatal("Expected a candidate, got nil")
+	}
+	if best.MIGUUID != "mig-1" {
+		t.Errorf("Shared pod should prefer more pods (mig-1), got %s", best.MIGUUID)
 	}
 }

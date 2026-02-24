@@ -65,7 +65,7 @@ func NewScheduler() (*Scheduler, error) {
 	}
 
 	// 2. Create K8s client first (needed for K8s discoverer)
-	kubeClient, err := buildKubeClient()
+	kubeClient, restConfig, err := buildKubeClient()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kube client: %w", err)
 	}
@@ -123,15 +123,28 @@ func NewScheduler() (*Scheduler, error) {
 		} else {
 			strategy = allocator.NewFIFOScheduler()
 		}
+		var preemptionOrch *scheduler.PreemptionOrchestrator
+		if cfg.Scheduler.PreemptionEnabled {
+			executor := scheduler.NewK8sExecutor(clientset, restConfig)
+			preemptionOrch = scheduler.NewPreemptionOrchestrator(
+				executor,
+				time.Duration(cfg.Scheduler.CheckpointTimeoutSeconds)*time.Second,
+				int64(cfg.Scheduler.PreemptionGracePeriod),
+			)
+			log.Println("Preemption enabled")
+		}
 
 		s.watcher = scheduler.NewWatcher(
 			clientset,
 			manager,
 			registry, // Pass registry for live agent data
 			strategy, // Pass the BinPacker
+			alloc,
 			cfg.Scheduler.Name,
 			cfg.GPU.PollIntervalSeconds,
 			cfg.Workflows,
+			*scheduler.NewGangCollector(time.Duration(cfg.Scheduler.GangTimeoutSeconds) * time.Second),
+			preemptionOrch,
 			s.stopCh,
 		)
 		log.Println("Running in STANDALONE mode")
@@ -277,11 +290,12 @@ func (s *Scheduler) registerGPUReportEndpoint(mux *http.ServeMux) {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 }
-func buildKubeClient() (kubernetes.Interface, error) {
+func buildKubeClient() (kubernetes.Interface, *rest.Config, error) {
 	// Try in-cluster config first (when running in K8s)
 	cfg, err := rest.InClusterConfig()
 	if err == nil {
-		return kubernetes.NewForConfig(cfg)
+		client, err := kubernetes.NewForConfig(cfg)
+		return client, cfg, err
 	}
 
 	// Try kubeconfig file (for local dev with cluster)
@@ -291,12 +305,13 @@ func buildKubeClient() (kubernetes.Interface, error) {
 		if _, err := os.Stat(kubeConfigPath); err == nil {
 			cfg, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
 			if err == nil {
-				return kubernetes.NewForConfig(cfg)
+				client, err := kubernetes.NewForConfig(cfg)
+				return client, cfg, err
 			}
 		}
 	}
 
 	// No cluster available — return nil client for local testing
 	log.Println("Warning: No Kubernetes cluster available. Running in standalone mode.")
-	return nil, nil
+	return nil, nil, nil
 }
