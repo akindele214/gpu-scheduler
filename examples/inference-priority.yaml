@@ -1,0 +1,35 @@
+# inference-priority.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inference-service
+  labels:
+    gpu-scheduler.io/pool: "mig"
+  annotations:
+    gpu-scheduler/memory-mb: "10240"
+    gpu-scheduler/gpu-count: "4"
+    gpu-scheduler/memory-mode: "per-gpu"
+    gpu-scheduler/workflow: "build"
+    gpu-scheduler/priority: "95"
+spec:
+  schedulerName: gpu-scheduler
+  containers:
+  - name: inference
+    image: nvcr.io/nvidia/pytorch:24.01-py3
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        python -c "
+        import torch, time
+        devs = [torch.device(f'cuda:{i}') for i in range(torch.cuda.device_count())]
+        print(f'Inference service running on {len(devs)} MIG instances')
+        for d in devs:
+            torch.randn(2048, 2048, device=d)
+        print('Model loaded. Serving requests...')
+        time.sleep(120)
+        print('Inference complete.')
+        "
+    resources:
+      limits:
+        nvidia.com/gpu: "4"
+  restartPolicy: Never

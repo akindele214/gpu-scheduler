@@ -33,7 +33,7 @@ func NewMockDiscoverer(nodeName string, gpuConfigs []MockGPUConfig) *MockDiscove
 	gpus := make([]types.GPU, len(gpuConfigs))
 	for i, cfg := range gpuConfigs {
 		gpus[i] = types.GPU{
-			ID:                 uuid.New(),
+			ID:                 "GPU-" + uuid.New().String(), // NVIDIA format
 			Index:              i,
 			NodeName:           nodeName,
 			TotalMemoryMB:      cfg.TotalMemoryMB,
@@ -68,9 +68,6 @@ func (m *MockDiscoverer) Shutdown() error {
 
 type NVMLDiscoverer struct {
 	nodeName string
-	// gpuUUIDs maps nvidia-smi GPU UUID strings to our internal UUIDs
-	// so that GPU identity is stable across Discover/Refresh calls.
-	gpuUUIDs map[string]uuid.UUID
 }
 
 func NewNVMLDiscoverer(nodeName string) (*NVMLDiscoverer, error) {
@@ -85,7 +82,6 @@ func NewNVMLDiscoverer(nodeName string) (*NVMLDiscoverer, error) {
 
 	d := &NVMLDiscoverer{
 		nodeName: nodeName,
-		gpuUUIDs: make(map[string]uuid.UUID),
 	}
 
 	// Verify nvidia-smi is available
@@ -141,15 +137,9 @@ func (n *NVMLDiscoverer) queryGPUs() ([]types.GPU, error) {
 			return nil, fmt.Errorf("parsing utilization %q: %w", fields[4], err)
 		}
 
-		// Maintain stable UUID for each physical GPU
-		id, exists := n.gpuUUIDs[nvidiaUUID]
-		if !exists {
-			id = uuid.New()
-			n.gpuUUIDs[nvidiaUUID] = id
-		}
-
+		// Use NVIDIA UUID directly as the GPU ID
 		gpus = append(gpus, types.GPU{
-			ID:                 id,
+			ID:                 nvidiaUUID, // e.g., "GPU-a1b2c3d4-..."
 			Index:              index,
 			NodeName:           n.nodeName,
 			TotalMemoryMB:      totalMem,

@@ -44,7 +44,7 @@ type GangSchedulingResult struct {
 
 type GPUPlacement struct {
 	NodeName string
-	GPUID    uuid.UUID
+	GPUID    string
 	MemoryMB int // Memory allocated on this GPU
 }
 
@@ -59,17 +59,19 @@ type Job struct {
 	Status      JobStatus
 	CreatedAt   time.Time
 	ScheduledAt time.Time
+	Shared      bool
 }
 
 type GPU struct {
-	ID                 uuid.UUID
-	Index              int // 0-7 on a node
+	ID                 string // NVIDIA UUID format: "GPU-xxx" or internal ID
+	Index              int    // 0-7 on a node
 	NodeName           string
 	TotalMemoryMB      int
 	UsedMemoryMB       int
 	UtilizationPercent float64 // 0.0 - 100.0
 	IsHealthy          bool
 	IsShared           bool
+	AllocatedPods      int
 }
 
 // AvailableMemoryMB returns free memory on this GPU
@@ -89,8 +91,9 @@ type NodeInfo struct {
 type SchedulingResult struct {
 	JobID     uuid.UUID
 	NodeName  string
-	GPUIDs    []uuid.UUID // supports multi-GPU jobs
+	GPUIDs    []string // NVIDIA UUID format: "GPU-xxx" or "MIG-xxx"
 	Success   bool
 	Reason    string
 	Timestamp time.Time
+	IsMIG     bool
 }

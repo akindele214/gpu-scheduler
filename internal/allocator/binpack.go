@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/akindele214/gpu-scheduler/pkg/types"
-	"github.com/google/uuid"
 )
 
 type BinPacker struct {
@@ -25,7 +24,7 @@ func (bp *BinPacker) Schedule(job *types.Job, nodes []types.NodeInfo) (*types.Sc
 		return nil, fmt.Errorf("no nodes available")
 	}
 
-	candidates, err := bp.findCandidates(job.MemoryMB, nodes)
+	candidates, err := bp.findCandidates(job.MemoryMB, nodes, job.Shared)
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +33,7 @@ func (bp *BinPacker) Schedule(job *types.Job, nodes []types.NodeInfo) (*types.Sc
 	return &types.SchedulingResult{
 		JobID:     job.ID,
 		NodeName:  bestcandidate.node.Name,
-		GPUIDs:    []uuid.UUID{bestcandidate.gpu.ID},
+		GPUIDs:    []string{bestcandidate.gpu.ID},
 		Success:   true,
 		Timestamp: time.Now(),
 	}, nil
@@ -60,7 +59,7 @@ func (bp *BinPacker) ScheduleGang(job *types.Job, nodes []types.NodeInfo, gpuCou
 		requiredMemory = 0
 	}
 
-	gangCandidates, err := bp.findGangCandidates(gpuCount, requiredMemory, nodes)
+	gangCandidates, err := bp.findGangCandidates(gpuCount, requiredMemory, nodes, job.Shared)
 	if err != nil {
 		return nil, err
 	}
@@ -120,12 +119,12 @@ type gangCandidate struct {
 	totalWaste int
 }
 
-func (bp *BinPacker) findCandidates(requiredMemory int, nodes []types.NodeInfo) ([]candidate, error) {
+func (bp *BinPacker) findCandidates(requiredMemory int, nodes []types.NodeInfo, allowShared bool) ([]candidate, error) {
 	candidates := []candidate{}
 
 	for _, node := range nodes {
 		for _, gpu := range node.GPUs {
-			if !gpu.IsHealthy {
+			if !gpu.IsHealthy || (!allowShared && gpu.AllocatedPods > 0) {
 				continue
 			}
 			// Skip fully-used GPUs (count-based allocation)
@@ -144,13 +143,13 @@ func (bp *BinPacker) findCandidates(requiredMemory int, nodes []types.NodeInfo) 
 		}
 	}
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no GPU with sufficient memory of %dGB", requiredMemory)
+		return nil, fmt.Errorf("no GPU with sufficient memory of %dMB", requiredMemory)
 	}
 
 	return candidates, nil
 }
 
-func (bp *BinPacker) findGangCandidates(gpuCount int, requiredMemory int, nodes []types.NodeInfo) ([]gangCandidate, error) {
+func (bp *BinPacker) findGangCandidates(gpuCount int, requiredMemory int, nodes []types.NodeInfo, allowShared bool) ([]gangCandidate, error) {
 	returnCandidates := []gangCandidate{}
 
 	for _, node := range nodes {
@@ -166,7 +165,7 @@ func (bp *BinPacker) findGangCandidates(gpuCount int, requiredMemory int, nodes 
 		eligible := []eligibleGPU{}
 
 		for _, gpu := range node.GPUs {
-			if !gpu.IsHealthy {
+			if !gpu.IsHealthy || (!allowShared && gpu.AllocatedPods > 0) {
 				continue
 			}
 			// Skip fully-used GPUs (count-based allocation)

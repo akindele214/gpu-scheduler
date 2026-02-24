@@ -95,11 +95,11 @@ func (k *K8sDiscoverer) Discover() ([]types.GPU, error) {
 			cacheKey := fmt.Sprintf("%s-gpu-%d", node.Name, i)
 
 			// Reuse cached GPU ID or create new one
-			var gpuID uuid.UUID
+			var gpuID string
 			if cached, exists := k.gpuCache[cacheKey]; exists {
 				gpuID = cached.ID
 			} else {
-				gpuID = uuid.New()
+				gpuID = "GPU-" + uuid.New().String() // Synthetic NVIDIA-style ID
 			}
 
 			// Estimate memory based on common GPU types

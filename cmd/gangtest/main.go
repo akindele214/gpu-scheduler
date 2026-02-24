@@ -333,7 +333,7 @@ func runWorkloadTest(manager *gpu.Manager, nodes []types.NodeInfo, gpuCount int)
 
 	// Step 4: Build CUDA_VISIBLE_DEVICES from placement indices
 	scheduledIndices := make([]int, 0, len(result.Placements))
-	scheduledGPUIDs := make(map[uuid.UUID]bool)
+	scheduledGPUIDs := make(map[string]bool)
 	for _, p := range result.Placements {
 		for _, g := range nodes[0].GPUs {
 			if g.ID == p.GPUID {
