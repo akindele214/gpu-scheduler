@@ -53,7 +53,7 @@ EOF
 ## Install k3s
 
 ```bash
-curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --advertise-address=173.185.79.174 --tls-san=173.185.79.174 --node-external-ip=173.185.79.174" sh -
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --advertise-address=163.5.212.79 --tls-san=163.5.212.79 --node-external-ip=163.5.212.79" sh -
 ```
 
 ## Fix kubeconfig permissions

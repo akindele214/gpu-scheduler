@@ -215,6 +215,20 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 		result, err := w.strategy.ScheduleGang(job, nodes, gpuCount, memoryMode)
 		if err != nil {
 			log.Printf("Failed to schedule pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			if w.preemptionOrchestrator != nil {
+				candidates := w.buildPreemptionCandidates(pod)
+				ctx := context.Background()
+				victims, preemptErr := w.preemptionOrchestrator.Preempt(ctx, GetPriorityFromPod(pod, w.workflowCfg), memoryMB, candidates)
+				if preemptErr != nil {
+					log.Printf("[PREEMPT] No preemption possible for %s/%s: %v", pod.Namespace, pod.Name, preemptErr)
+				} else {
+					for _, v := range victims {
+						w.pendingEvictions[fmt.Sprintf("%s/%s", v.Pod.Namespace, v.Pod.Name)] = time.Now()
+					}
+					log.Printf("[PREEMPT] Evicted %d pod(s) for %s/%s, will retry on next cycle", len(victims), pod.Namespace, pod.Name)
+					return
+				}
+			}
 			metrics.GPUJobsFailed.WithLabelValues("no_capacity").Inc()
 			return
 		}

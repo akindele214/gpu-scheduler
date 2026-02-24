@@ -27,5 +27,4 @@ go.work.sum
 .runpod_key.pub
 vast-key
 vast-key.pub
-certs/
 .DS_Store

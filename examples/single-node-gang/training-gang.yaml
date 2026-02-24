@@ -1,0 +1,147 @@
+# training-gang.yaml — 4x RTX 4090 on single Vast.ai node
+# Apply all at once: kubectl apply -f training-gang.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ddp-worker-0
+  annotations:
+    gpu-scheduler/gang-id: "ddp-training-001"
+    gpu-scheduler/gang-size: "4"
+    gpu-scheduler/memory-mb: "20000"
+    gpu-scheduler/workflow: "training"
+    gpu-scheduler/preemptible: "true"
+    gpu-scheduler/checkpoint-cmd: "python3 -c 'import json; json.dump({\"epoch\":5,\"loss\":0.23}, open(\"/tmp/checkpoint.json\",\"w\")); print(\"CHECKPOINT SAVED\")'"
+spec:
+  schedulerName: gpu-scheduler
+  containers:
+  - name: worker
+    image: nvcr.io/nvidia/pytorch:24.01-py3
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        echo "DDP Worker 0 starting..."
+        python -c "
+        import torch, time, os
+        dev = torch.device('cuda')
+        print(f'Worker 0 on {torch.cuda.get_device_name(dev)}')
+        # Allocate ~4GB to simulate training
+        tensors = [torch.randn(1024, 1024, device=dev) for _ in range(16)]
+        for epoch in range(1, 11):
+            for t in tensors:
+                t = t @ t.T
+            print(f'[Worker 0] Epoch {epoch}/10 complete, loss={1.0/(epoch+1):.4f}')
+            time.sleep(15)
+        print('Training complete!')
+        "
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ddp-worker-1
+  annotations:
+    gpu-scheduler/gang-id: "ddp-training-001"
+    gpu-scheduler/gang-size: "4"
+    gpu-scheduler/memory-mb: "20000"
+    gpu-scheduler/workflow: "training"
+    gpu-scheduler/preemptible: "true"
+    gpu-scheduler/checkpoint-cmd: "python3 -c 'import json; json.dump({\"epoch\":5,\"loss\":0.23}, open(\"/tmp/checkpoint.json\",\"w\")); print(\"CHECKPOINT SAVED\")'"
+spec:
+  schedulerName: gpu-scheduler
+  containers:
+  - name: worker
+    image: nvcr.io/nvidia/pytorch:24.01-py3
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        python -c "
+        import torch, time
+        dev = torch.device('cuda')
+        print(f'Worker 1 on {torch.cuda.get_device_name(dev)}')
+        tensors = [torch.randn(1024, 1024, device=dev) for _ in range(16)]
+        for epoch in range(1, 11):
+            for t in tensors:
+                t = t @ t.T
+            print(f'[Worker 1] Epoch {epoch}/10 complete, loss={1.0/(epoch+1):.4f}')
+            time.sleep(15)
+        print('Training complete!')
+        "
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ddp-worker-2
+  annotations:
+    gpu-scheduler/gang-id: "ddp-training-001"
+    gpu-scheduler/gang-size: "4"
+    gpu-scheduler/memory-mb: "20000"
+    gpu-scheduler/workflow: "training"
+    gpu-scheduler/preemptible: "true"
+    gpu-scheduler/checkpoint-cmd: "python3 -c 'import json; json.dump({\"epoch\":5,\"loss\":0.23}, open(\"/tmp/checkpoint.json\",\"w\")); print(\"CHECKPOINT SAVED\")'"
+spec:
+  schedulerName: gpu-scheduler
+  containers:
+  - name: worker
+    image: nvcr.io/nvidia/pytorch:24.01-py3
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        python -c "
+        import torch, time
+        dev = torch.device('cuda')
+        print(f'Worker 2 on {torch.cuda.get_device_name(dev)}')
+        tensors = [torch.randn(1024, 1024, device=dev) for _ in range(16)]
+        for epoch in range(1, 11):
+            for t in tensors:
+                t = t @ t.T
+            print(f'[Worker 2] Epoch {epoch}/10 complete, loss={1.0/(epoch+1):.4f}')
+            time.sleep(15)
+        print('Training complete!')
+        "
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ddp-worker-3
+  annotations:
+    gpu-scheduler/gang-id: "ddp-training-001"
+    gpu-scheduler/gang-size: "4"
+    gpu-scheduler/memory-mb: "20000"
+    gpu-scheduler/workflow: "training"
+    gpu-scheduler/preemptible: "true"
+    gpu-scheduler/checkpoint-cmd: "python3 -c 'import json; json.dump({\"epoch\":5,\"loss\":0.23}, open(\"/tmp/checkpoint.json\",\"w\")); print(\"CHECKPOINT SAVED\")'"
+spec:
+  schedulerName: gpu-scheduler
+  containers:
+  - name: worker
+    image: nvcr.io/nvidia/pytorch:24.01-py3
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        python -c "
+        import torch, time
+        dev = torch.device('cuda')
+        print(f'Worker 3 on {torch.cuda.get_device_name(dev)}')
+        tensors = [torch.randn(1024, 1024, device=dev) for _ in range(16)]
+        for epoch in range(1, 11):
+            for t in tensors:
+                t = t @ t.T
+            print(f'[Worker 3] Epoch {epoch}/10 complete, loss={1.0/(epoch+1):.4f}')
+            time.sleep(15)
+        print('Training complete!')
+        "
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+  restartPolicy: Never

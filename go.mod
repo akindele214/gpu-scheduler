@@ -1,6 +1,6 @@
 module github.com/akindele214/gpu-scheduler
 
-go 1.25.5
+go 1.25.0
 
 require (
 	github.com/NVIDIA/go-nvml v0.13.0-1
