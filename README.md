@@ -141,6 +141,41 @@ metadata:
 
 Requires the mutating webhook (`deploy/mutating-webhook.yaml`) which removes the `nvidia.com/gpu` resource limit and injects `NVIDIA_VISIBLE_DEVICES=all`.
 
+#### MPS Memory Enforcement
+
+Shared GPU pods use NVIDIA MPS (Multi-Process Service) for driver-level memory isolation. Without MPS, a pod requesting 2048 MB could consume all GPU memory, starving other pods on the same GPU.
+
+**How it works:**
+
+- Dedicated GPUs run in `EXCLUSIVE_PROCESS` compute mode with the MPS daemon
+- The webhook injects `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=0=<memMB>M` and mounts the host's MPS pipe directory into each shared pod
+- The scheduler routes shared pods exclusively to MPS-enabled GPUs, and non-shared pods to non-MPS GPUs
+
+**Setup MPS on GPU nodes:**
+
+```bash
+# Enable MPS on specific GPUs (run on each GPU node as root)
+sudo bash scripts/setup-mps.sh 0        # MPS on GPU 0 only
+sudo bash scripts/setup-mps.sh 0 2      # MPS on GPU 0 and GPU 2
+
+# Stop MPS and restore DEFAULT compute mode
+sudo bash scripts/setup-mps.sh stop
+```
+
+This sets the specified GPUs to `EXCLUSIVE_PROCESS` mode and starts the MPS control daemon. Other GPUs remain in `DEFAULT` mode for non-shared workloads.
+
+**Verify MPS is running:**
+
+```bash
+nvidia-smi -i 0 --query-gpu=compute_mode --format=csv,noheader
+# Should output: Exclusive_Process
+
+ps aux | grep nvidia-cuda-mps
+# Should show nvidia-cuda-mps-control -d process
+```
+
+Once MPS is running and the GPU agent is started, the agent detects `EXCLUSIVE_PROCESS` mode via NVML and reports `mps_enabled: true`. The dashboard displays an MPS badge on MPS-enabled GPUs.
+
 ### MIG Routing
 
 On A100/H100 GPUs with MIG enabled, pods are automatically routed to MIG instances or full GPUs:

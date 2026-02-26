@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -97,24 +98,40 @@ func buildSharedGPUPatches(pod *corev1.Pod) []patchOp {
 	var patches []patchOp
 
 	// 1. Add NVIDIA_VISIBLE_DEVICES env to each container
-	for i, c := range pod.Spec.Containers {
-		if hasEnv(c.Env, "NVIDIA_VISIBLE_DEVICES") {
-			continue
+	for ci, c := range pod.Spec.Containers {
+		var newEnvs []corev1.EnvVar
+
+		if !hasEnv(c.Env, "NVIDIA_VISIBLE_DEVICES") {
+			newEnvs = append(newEnvs, corev1.EnvVar{Name: "NVIDIA_VISIBLE_DEVICES", Value: "all"})
 		}
-		envVar := corev1.EnvVar{Name: "NVIDIA_VISIBLE_DEVICES", Value: "all"}
-		if len(c.Env) == 0 {
+		if !hasEnv(c.Env, "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT") {
+			newEnvs = append(newEnvs, corev1.EnvVar{
+				Name:  "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT",
+				Value: mpsMemoryLimit(pod),
+			})
+		}
+		if !hasEnv(c.Env, "CUDA_MPS_PIPE_DIRECTORY") {
+			newEnvs = append(newEnvs, corev1.EnvVar{
+				Name:  "CUDA_MPS_PIPE_DIRECTORY",
+				Value: "/tmp/nvidia-mps",
+			})
+		}
+		if len(c.Env) == 0 && len(newEnvs) > 0 {
 			patches = append(patches, patchOp{
 				Op:    "add",
-				Path:  fmt.Sprintf("/spec/containers/%d/env", i),
-				Value: []corev1.EnvVar{envVar},
+				Path:  fmt.Sprintf("/spec/containers/%d/env", ci),
+				Value: newEnvs,
 			})
 		} else {
-			patches = append(patches, patchOp{
-				Op:    "add",
-				Path:  fmt.Sprintf("/spec/containers/%d/env/-", i),
-				Value: envVar,
-			})
+			for _, envVar := range newEnvs {
+				patches = append(patches, patchOp{
+					Op:    "add",
+					Path:  fmt.Sprintf("/spec/containers/%d/env/-", ci),
+					Value: envVar,
+				})
+			}
 		}
+
 	}
 
 	// Same for init containers
@@ -168,6 +185,22 @@ func buildSharedGPUPatches(pod *corev1.Pod) []patchOp {
 			Value: gpuVolume,
 		})
 	}
+	// 2b. Add hostPath volume for MPS pipe directory
+	mpsVolume := corev1.Volume{
+		Name: "nvidia-mps",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{
+				Path: "/tmp/nvidia-mps",
+			},
+		},
+	}
+
+	// Safe to use /- here: gpuVolume block above guarantees /spec/volumes exists
+	patches = append(patches, patchOp{
+		Op:    "add",
+		Path:  "/spec/volumes/-",
+		Value: mpsVolume,
+	})
 
 	// 3. Add volumeMount to each container
 	mount := corev1.VolumeMount{
@@ -207,6 +240,22 @@ func buildSharedGPUPatches(pod *corev1.Pod) []patchOp {
 			})
 		}
 	}
+
+	// 3b. Add MPS pipe directory mount to each container
+	// Safe to use /- here: gpu-info mount loop above guarantees volumeMounts exists
+	mpsMount := corev1.VolumeMount{
+		Name:      "nvidia-mps",
+		MountPath: "/tmp/nvidia-mps",
+	}
+
+	for i := range pod.Spec.Containers {
+		patches = append(patches, patchOp{
+			Op:    "add",
+			Path:  fmt.Sprintf("/spec/containers/%d/volumeMounts/-", i),
+			Value: mpsMount,
+		})
+	}
+
 	// 4. Remove nvidia.com/gpu resource limits and requests
 	// so the device plugin doesn't block shared pods
 	for i, c := range pod.Spec.Containers {
@@ -241,4 +290,18 @@ func hasEnv(envs []corev1.EnvVar, name string) bool {
 		}
 	}
 	return false
+}
+
+func mpsMemoryLimit(pod *corev1.Pod) string {
+	memMB := GetGPUMemoryFromPod(pod)
+	gpuCount := GetGPUCountFromPod(pod)
+	if gpuCount <= 1 {
+		return fmt.Sprintf("0=%dM", memMB)
+	}
+
+	parts := make([]string, gpuCount)
+	for i := 0; i < gpuCount; i++ {
+		parts[i] = fmt.Sprintf("%d=%dM", i, memMB)
+	}
+	return strings.Join(parts, ",")
 }
