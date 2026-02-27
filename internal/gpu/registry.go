@@ -33,9 +33,9 @@ type PodAllocation struct {
 }
 
 type NodeGPUs struct {
-	NodeName   string
-	GPUs       []agent.GPUInfo
-	ReportedAt time.Time
+	NodeName   string          `json:"node_name"`
+	GPUs       []agent.GPUInfo `json:"gpus"`
+	ReportedAt time.Time       `json:"reported_at"`
 }
 
 func NewRegistry() *Registry {
@@ -66,6 +66,7 @@ func (r *Registry) UpdateFromReport(report *agent.GPUReport) {
 }
 
 func (r *Registry) GetAllNodes() []*NodeGPUs {
+	r.RemoveStaleNodes(time.Second * 30)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var nodes []*NodeGPUs
@@ -108,6 +109,7 @@ type GPUCandidate struct {
 	FreeMemoryMB  int
 	TotalMemoryMB int
 	PodCount      int
+	MPSEnabled    bool
 }
 
 func (r *Registry) FindAvailableMIG(minMemoryMB int) []MIGCandidate {
@@ -141,6 +143,28 @@ func (r *Registry) FindAvailableMIG(minMemoryMB int) []MIGCandidate {
 	return candidates
 }
 
+func (r *Registry) FindAvailableMPSGPU(minMemoryMB int) []GPUCandidate {
+	all := r.FindAvailableFullGPU(minMemoryMB)
+	var mps []GPUCandidate
+	for _, c := range all {
+		if c.MPSEnabled {
+			mps = append(mps, c)
+		}
+	}
+	return mps
+}
+
+func (r *Registry) FindAvailableNonMPSGPU(minMemoryMB int) []GPUCandidate {
+	all := r.FindAvailableFullGPU(minMemoryMB)
+	var nonMPS []GPUCandidate
+	for _, c := range all {
+		if !c.MPSEnabled {
+			nonMPS = append(nonMPS, c)
+		}
+	}
+	return nonMPS
+}
+
 func (r *Registry) FindAvailableFullGPU(minMemoryMB int) []GPUCandidate {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -172,6 +196,7 @@ func (r *Registry) FindAvailableFullGPU(minMemoryMB int) []GPUCandidate {
 				FreeMemoryMB:  freeMB,
 				TotalMemoryMB: gpu.TotalMemoryMB,
 				PodCount:      podCount,
+				MPSEnabled:    gpu.MPSEnabled,
 			})
 		}
 	}
@@ -423,4 +448,30 @@ func (r *Registry) GetNodes() []types.NodeInfo {
 		})
 	}
 	return nodes
+}
+
+// GetLastSeen returns the last report time for a node
+func (r *Registry) GetLastSeen(nodeName string) time.Time {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.lastSeen[nodeName]
+}
+
+// GetPodCount returns the number of pods on a specific GPU
+func (r *Registry) GetPodCount(nodeName, gpuUUID string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.podCountPerGPU[nodeName] == nil {
+		return 0
+	}
+	return r.podCountPerGPU[nodeName][gpuUUID]
+}
+
+// GetAllPodAllocations returns a snapshot of all pod allocations
+func (r *Registry) GetAllPodAllocations() map[string]*PodAllocation {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.podAllocations
 }

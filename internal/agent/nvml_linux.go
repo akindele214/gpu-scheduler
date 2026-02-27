@@ -130,6 +130,11 @@ func collectGPUInfo(device nvml.Device, index int) (GPUInfo, error) {
 		}
 		gpu.MIGInstances = instances
 	}
+	// MPS detection via compute mode
+	computeMode, ret := device.GetComputeMode()
+	if ret == nvml.SUCCESS {
+		gpu.MPSEnabled = (computeMode == nvml.COMPUTEMODE_EXCLUSIVE_PROCESS)
+	}
 
 	return gpu, nil
 }

@@ -3,56 +3,56 @@ package config
 import "fmt"
 
 type Config struct {
-	Scheduler  SchedulerConfig  `mapstructure:"scheduler"`
-	Queue      QueueConfig      `mapstructure:"queue"`
-	Workflows  WorkflowConfig   `mapstructure:"workflows"`
-	GPU        GPUConfig        `mapstructure:"gpu"`
-	Kubernetes KubernetesConfig `mapstructure:"kubernetes"`
-	Logging    LoggingConfig    `mapstructure:"logging"`
+	Scheduler  SchedulerConfig  `mapstructure:"scheduler" json:"scheduler"`
+	Queue      QueueConfig      `mapstructure:"queue" json:"queue"`
+	Workflows  WorkflowConfig   `mapstructure:"workflows" json:"workflows"`
+	GPU        GPUConfig        `mapstructure:"gpu" json:"gpu"`
+	Kubernetes KubernetesConfig `mapstructure:"kubernetes" json:"kubernetes"`
+	Logging    LoggingConfig    `mapstructure:"logging" json:"logging"`
 }
 
 type SchedulerConfig struct {
-	Name                     string `mapstructure:"name"`
-	Port                     int    `mapstructure:"port"`
-	MetricsPort              int    `mapstructure:"metricsPort"`
-	Mode                     string `mapstructure:"mode"`
-	GangTimeoutSeconds       int    `mapstructure:"gangTimeoutSeconds"`
-	PreemptionEnabled        bool   `mapstructure:"preemptionEnabled"`
-	CheckpointTimeoutSeconds int    `mapstructure:"checkpointTimeoutSeconds"`
-	PreemptionGracePeriod    int    `mapstructure:"preemptionGracePeriod"`
+	Name                     string `mapstructure:"name" json:"name"`
+	Port                     int    `mapstructure:"port" json:"port"`
+	MetricsPort              int    `mapstructure:"metricsPort" json:"metrics_port"`
+	Mode                     string `mapstructure:"mode" json:"mode"`
+	GangTimeoutSeconds       int    `mapstructure:"gangTimeoutSeconds" json:"gang_timeout_seconds"`
+	PreemptionEnabled        bool   `mapstructure:"preemptionEnabled" json:"preemption_enabled"`
+	CheckpointTimeoutSeconds int    `mapstructure:"checkpointTimeoutSeconds" json:"checkpoint_timeout_seconds"`
+	PreemptionGracePeriod    int    `mapstructure:"preemptionGracePeriod" json:"preemption_grace_period"`
 }
 
 type WorkFlowTypeConfig struct {
-	Name        string `mapstructure:"name"`
-	Priority    int    `mapstructure:"priority"`
-	Preemptible bool   `mapstructure:"preemptible"`
+	Name        string `mapstructure:"name" json:"name"`
+	Priority    int    `mapstructure:"priority" json:"priority"`
+	Preemptible bool   `mapstructure:"preemptible" json:"preemptible"`
 }
 
 type WorkflowConfig struct {
-	Enabled         bool                 `mapstructure:"enabled"`
-	AllowCustom     bool                 `mapstructure:"allowCustom"`
-	DefaultPriority int                  `mapstructure:"defaultPriority"`
-	Types           []WorkFlowTypeConfig `mapstructure:"types"`
+	Enabled         bool                 `mapstructure:"enabled" json:"enabled"`
+	AllowCustom     bool                 `mapstructure:"allowCustom" json:"allow_custom"`
+	DefaultPriority int                  `mapstructure:"defaultPriority" json:"default_priority"`
+	Types           []WorkFlowTypeConfig `mapstructure:"types" json:"types"`
 }
 
 type QueueConfig struct {
-	MaxSize       int    `mapstructure:"maxSize"`
-	DefaultPolicy string `mapstructure:"defaultPolicy"`
+	MaxSize       int    `mapstructure:"maxSize" json:"max_size"`
+	DefaultPolicy string `mapstructure:"defaultPolicy" json:"default_policy"`
 }
 
 type GPUConfig struct {
-	PollIntervalSeconds int  `mapstructure:"pollIntervalSeconds"`
-	MockMode            bool `mapstructure:"mockMode"`
+	PollIntervalSeconds int  `mapstructure:"pollIntervalSeconds" json:"poll_interval_seconds"`
+	MockMode            bool `mapstructure:"mockMode" json:"mock_mode"`
 }
 
 type KubernetesConfig struct {
-	Kubeconfig string `mapstructure:"kubeconfig"`
-	Namespace  string `mapstructure:"namespace"`
+	Kubeconfig string `mapstructure:"kubeconfig" json:"kubeconfig"`
+	Namespace  string `mapstructure:"namespace" json:"namespace"`
 }
 
 type LoggingConfig struct {
-	Level  string `mapstructure:"level"`
-	Format string `mapstructure:"format"`
+	Level  string `mapstructure:"level" json:"level"`
+	Format string `mapstructure:"format" json:"format"`
 }
 
 func (config *Config) Validate() error {

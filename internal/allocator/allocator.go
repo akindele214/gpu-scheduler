@@ -130,9 +130,18 @@ func (a *Allocator) allocateFromMIG(memoryMB int, job *types.Job, isShared bool)
 
 // allocateFromFullGPU finds and allocates a full GPU
 func (a *Allocator) allocateFromFullGPU(memoryMB int, job *types.Job, isShared bool) (*types.SchedulingResult, error) {
-	candidates := a.registry.FindAvailableFullGPU(memoryMB)
-	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no available full GPUs with %dMB free", memoryMB)
+	var candidates []gpu.GPUCandidate
+
+	if isShared {
+		candidates = a.registry.FindAvailableMPSGPU(memoryMB)
+		if len(candidates) == 0 {
+			return nil, fmt.Errorf("no available MPS GPUs with %dMB free (shared pods require MPS)", memoryMB)
+		}
+	} else {
+		candidates = a.registry.FindAvailableNonMPSGPU(memoryMB)
+		if len(candidates) == 0 {
+			return nil, fmt.Errorf("no available non-MPS GPUs with %dMB free", memoryMB)
+		}
 	}
 
 	best := SelectBestFullGPU(candidates, isShared)
