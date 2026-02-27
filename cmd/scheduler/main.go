@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	gpuscheduler "github.com/akindele214/gpu-scheduler"
 	"github.com/akindele214/gpu-scheduler/internal/agent"
 	"github.com/akindele214/gpu-scheduler/internal/allocator"
 	"github.com/akindele214/gpu-scheduler/internal/config"
@@ -152,6 +153,7 @@ func NewScheduler() (*Scheduler, error) {
 		log.Println("Running in STANDALONE mode")
 		mux := http.NewServeMux()
 		s.registerGPUReportEndpoint(mux)
+		mux.Handle("/", gpuscheduler.DashboardHandler())
 		mux.Handle("/metrics", promhttp.Handler())
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
