@@ -20,6 +20,7 @@ type GPUInfo struct {
 	UtilizationGPU int    `json:"utilization_gpu"`
 	Temperature    int    `json:"temperature_c"`
 	IsHealthy      bool   `json:"is_healthy"`
+	MPSEnabled     bool   `json:"mps_enabled"`
 
 	// MIG state — agent just reports what exists
 	MIGEnabled   bool          `json:"mig_enabled"`

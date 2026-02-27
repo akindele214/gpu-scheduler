@@ -12,9 +12,11 @@ import (
 	"syscall"
 	"time"
 
+	gpuscheduler "github.com/akindele214/gpu-scheduler"
 	"github.com/akindele214/gpu-scheduler/internal/agent"
 	"github.com/akindele214/gpu-scheduler/internal/allocator"
 	"github.com/akindele214/gpu-scheduler/internal/config"
+	"github.com/akindele214/gpu-scheduler/internal/dashboard"
 	"github.com/akindele214/gpu-scheduler/internal/gpu"
 	"github.com/akindele214/gpu-scheduler/internal/scheduler"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -54,6 +56,7 @@ type Scheduler struct {
 	watcher       *scheduler.Watcher
 	server        *http.Server
 	webhookServer *http.Server
+	eventBus      *dashboard.EventBus
 	stopCh        chan struct{}
 }
 
@@ -150,11 +153,15 @@ func NewScheduler() (*Scheduler, error) {
 		log.Println("Running in STANDALONE mode")
 		mux := http.NewServeMux()
 		s.registerGPUReportEndpoint(mux)
+		mux.Handle("/", gpuscheduler.DashboardHandler())
 		mux.Handle("/metrics", promhttp.Handler())
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-
+		eventBus := dashboard.NewEventBus()
+		s.eventBus = eventBus
+		dashHandler := dashboard.NewHandler(registry, clientset, cfg, eventBus)
+		dashHandler.RegisterRoutes(mux)
 		s.server = &http.Server{
 			Addr:    fmt.Sprintf(":%d", cfg.Scheduler.Port),
 			Handler: mux,
@@ -280,11 +287,18 @@ func (s *Scheduler) registerGPUReportEndpoint(mux *http.ServeMux) {
 			usedMem += gpu.UsedMemoryMB
 			reservedMem += s.registry.GetReservedMemory(report.NodeName, gpu.UUID)
 		}
-		log.Printf("[REPORT] Node %s: %d GPU(s), actual=%d MB, reserved=%d MB, total=%d MB (%.1f%% actual, %.1f%% reserved), MIG=%v",
+		mpsCount := 0
+		for _, g := range report.GPUs {
+			if g.MPSEnabled {
+				mpsCount++
+			}
+		}
+		log.Printf("[REPORT] Node %s: %d GPU(s), actual=%d MB, reserved=%d MB, total=%d MB (%.1f%% actual, %.1f%% reserved), MIG=%v, MPS=%d/%d",
 			report.NodeName, len(report.GPUs), usedMem, reservedMem, totalMem,
 			float64(usedMem)/float64(totalMem)*100,
 			float64(reservedMem)/float64(totalMem)*100,
-			len(report.GPUs) > 0 && report.GPUs[0].MIGEnabled)
+			len(report.GPUs) > 0 && report.GPUs[0].MIGEnabled,
+			mpsCount, len(report.GPUs))
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))

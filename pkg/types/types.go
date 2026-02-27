@@ -72,6 +72,7 @@ type GPU struct {
 	IsHealthy          bool
 	IsShared           bool
 	AllocatedPods      int
+	IsMPS              bool
 }
 
 // AvailableMemoryMB returns free memory on this GPU

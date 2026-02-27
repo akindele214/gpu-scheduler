@@ -435,3 +435,88 @@ func TestRegistry_AllocatedPods_IndependentPerGPU(t *testing.T) {
 		t.Errorf("GPU-B: expected AllocatedPods 1, got %d", gpuB.AllocatedPods)
 	}
 }
+
+// ── MPS filtering tests ─────────────────────────────────────────────────────
+
+func makeGPUInfoMPS(uuid string, totalMB int, healthy bool, mpsEnabled bool) agent.GPUInfo {
+	info := makeGPUInfo(uuid, totalMB, healthy)
+	info.MPSEnabled = mpsEnabled
+	return info
+}
+
+func TestRegistry_FindAvailableMPSGPU_OnlyReturnsMPS(t *testing.T) {
+	r := NewRegistry()
+	r.UpdateFromReport(makeReport("node-1", []agent.GPUInfo{
+		makeGPUInfoMPS("GPU-MPS-1111", 24576, true, true),
+		makeGPUInfoMPS("GPU-DEFAULT-2222", 24576, true, false),
+	}))
+
+	candidates := r.FindAvailableMPSGPU(4096)
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 MPS candidate, got %d", len(candidates))
+	}
+	if candidates[0].GPUUUID != "GPU-MPS-1111" {
+		t.Errorf("expected MPS GPU UUID 'GPU-MPS-1111', got '%s'", candidates[0].GPUUUID)
+	}
+	if !candidates[0].MPSEnabled {
+		t.Error("expected MPSEnabled=true on MPS candidate")
+	}
+}
+
+func TestRegistry_FindAvailableNonMPSGPU_OnlyReturnsNonMPS(t *testing.T) {
+	r := NewRegistry()
+	r.UpdateFromReport(makeReport("node-1", []agent.GPUInfo{
+		makeGPUInfoMPS("GPU-MPS-1111", 24576, true, true),
+		makeGPUInfoMPS("GPU-DEFAULT-2222", 24576, true, false),
+	}))
+
+	candidates := r.FindAvailableNonMPSGPU(4096)
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 non-MPS candidate, got %d", len(candidates))
+	}
+	if candidates[0].GPUUUID != "GPU-DEFAULT-2222" {
+		t.Errorf("expected non-MPS GPU UUID 'GPU-DEFAULT-2222', got '%s'", candidates[0].GPUUUID)
+	}
+	if candidates[0].MPSEnabled {
+		t.Error("expected MPSEnabled=false on non-MPS candidate")
+	}
+}
+
+func TestRegistry_FindAvailableFullGPU_IncludesBoth(t *testing.T) {
+	r := NewRegistry()
+	r.UpdateFromReport(makeReport("node-1", []agent.GPUInfo{
+		makeGPUInfoMPS("GPU-MPS-1111", 24576, true, true),
+		makeGPUInfoMPS("GPU-DEFAULT-2222", 24576, true, false),
+	}))
+
+	candidates := r.FindAvailableFullGPU(4096)
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 candidates (both MPS and non-MPS), got %d", len(candidates))
+	}
+}
+
+func TestRegistry_FindAvailableMPSGPU_EmptyWhenNoMPS(t *testing.T) {
+	r := NewRegistry()
+	r.UpdateFromReport(makeReport("node-1", []agent.GPUInfo{
+		makeGPUInfoMPS("GPU-DEFAULT-1111", 24576, true, false),
+		makeGPUInfoMPS("GPU-DEFAULT-2222", 24576, true, false),
+	}))
+
+	candidates := r.FindAvailableMPSGPU(4096)
+	if len(candidates) != 0 {
+		t.Errorf("expected 0 MPS candidates when no MPS GPUs exist, got %d", len(candidates))
+	}
+}
+
+func TestRegistry_FindAvailableNonMPSGPU_EmptyWhenAllMPS(t *testing.T) {
+	r := NewRegistry()
+	r.UpdateFromReport(makeReport("node-1", []agent.GPUInfo{
+		makeGPUInfoMPS("GPU-MPS-1111", 24576, true, true),
+		makeGPUInfoMPS("GPU-MPS-2222", 24576, true, true),
+	}))
+
+	candidates := r.FindAvailableNonMPSGPU(4096)
+	if len(candidates) != 0 {
+		t.Errorf("expected 0 non-MPS candidates when all GPUs are MPS, got %d", len(candidates))
+	}
+}
