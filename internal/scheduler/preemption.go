@@ -86,15 +86,21 @@ func SelectVictims(requesterPriority, requiredMemoryMB int, candidates []Preempt
 type PreemptionOrchestrator struct {
 	executor          PodExecutor
 	checkpointTimeout time.Duration
+	publisher         EventPublisher
 	gracePeriod       int64 // seconds for pod deletion
 }
 
-func NewPreemptionOrchestrator(executor PodExecutor, checkpointTimeout time.Duration, gracePeriod int64) *PreemptionOrchestrator {
-	return &PreemptionOrchestrator{
+func NewPreemptionOrchestrator(executor PodExecutor, checkpointTimeout time.Duration, gracePeriod int64, publisher EventPublisher) *PreemptionOrchestrator {
+	po := &PreemptionOrchestrator{
 		executor:          executor,
 		checkpointTimeout: checkpointTimeout,
+		publisher:         publisher,
 		gracePeriod:       gracePeriod,
 	}
+	if po.publisher == nil {
+		po.publisher = noopPublisher{}
+	}
+	return po
 }
 
 // Preempt selects victims, checkpoints each, then deletes each.
@@ -122,6 +128,11 @@ func (po *PreemptionOrchestrator) Preempt(ctx context.Context, requesterPriority
 			continue
 		}
 		log.Printf("[PREEMPT] Evicted %s/%s (priority=%d, workflow=%s)", v.Pod.Namespace, v.Pod.Name, v.Priority, v.Workflow)
+		po.publisher.Publish("preemption", map[string]string{
+			"victim": v.Pod.Name, "namespace": v.Pod.Namespace,
+			"priority": fmt.Sprintf("%d", v.Priority), "workflow": v.Workflow,
+		})
+
 	}
 
 	return victims, nil

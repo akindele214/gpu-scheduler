@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
-import { createPod, deletePod, fetchPods } from "../hooks/useApi";
+import { useSSE } from "@/hooks/useSSE";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPod, deletePod, fetchPodLogs, fetchPods, streamPodLogs } from "../hooks/useApi";
 import type {
-    CreatePodRequest,
-    PodListResponse,
-    PodResponse,
+  CreatePodRequest,
+  PodListResponse,
+  PodResponse,
 } from "../types/api";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -11,19 +12,19 @@ import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
 } from "./ui/select";
 import {
-    Table,
-    TableBody,
-    TableCell,
-    TableHead,
-    TableHeader,
-    TableRow,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
 } from "./ui/table";
 
 function phaseBadge(phase: string) {
@@ -314,10 +315,12 @@ function SubmitPodForm({ onCreated }: { onCreated: () => void }) {
 function PodsTable({
   pods,
   onDelete,
+  onViewLogs,
   deletingPod,
 }: {
   pods: PodResponse[];
   onDelete: (namespace: string, name: string) => void;
+  onViewLogs: (namespace: string, name: string) => void;
   deletingPod: string | null;
 }) {
   return (
@@ -359,7 +362,14 @@ function PodsTable({
               <TableCell className="text-xs text-muted-foreground">
                 {new Date(pod.created_at).toLocaleTimeString()}
               </TableCell>
-              <TableCell>
+              <TableCell className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="xs"
+                  onClick={() => onViewLogs(pod.namespace, pod.name)}
+                >
+                  Logs
+                </Button>
                 <Button
                   variant="destructive"
                   size="xs"
@@ -379,19 +389,26 @@ function PodsTable({
 
 export default function PodsSection() {
   const [data, setData] = useState<PodListResponse | null>(null);
+  const [logsPod, setLogsPod] = useState<{ namespace: string; name: string } | null>(null);
+  const [logs, setLogs] = useState("");
+  const [streaming, setStreaming] = useState(false)
+  const controllerRef = useRef<AbortController | null>(null)
+  const logsEndRef = useRef<HTMLDivElement |null>(null)
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [deletingPod, setDeletingPod] = useState<string | null>(null);
 
-  const load = () => {
-    fetchPods()
-      .then(setData)
-      .catch((e) => setError(e.message));
-  };
 
+  const load = useCallback(() => {
+    fetchPods().then(setData).catch((e) => setError(e.message));
+  }, []);
+
+  useEffect(() => { load(); }, []);
+
+  useSSE(['pod-scheduled', 'pod-completed', 'pod-deleted', 'preemption'], load);
   useEffect(() => {
-    load();
-    const interval = setInterval(load, 5000);
+    // load();
+    const interval = setInterval(load, 300_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -407,6 +424,28 @@ export default function PodsSection() {
       setDeletingPod(null);
     }
   };
+  const handleViewLogs = async (namespace: string, name: string) => {
+    handleStopStream()
+    setLogsPod({name: name, namespace: namespace})
+    setLogs("")
+    const text = await fetchPodLogs(namespace, name, 100)
+    setLogs(text)
+  }
+
+  const handleFollow =(namespace: string, name: string)=> {
+    controllerRef.current?.abort()
+    setStreaming(true)
+    setLogsPod({name: name, namespace: namespace})
+    const controller = streamPodLogs(namespace, name, 100, (chunk) => setLogs(prev => prev + chunk))
+    controllerRef.current = controller
+  }
+  const handleStopStream = () => {
+    controllerRef.current?.abort()
+    setStreaming(false)
+  }
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
 
   if (error) return <div className="text-destructive p-4">Error: {error}</div>;
 
@@ -442,12 +481,61 @@ export default function PodsSection() {
       <Card>
         <CardContent className="pt-4">
           {data ? (
-            <PodsTable pods={data.pods} onDelete={handleDelete} deletingPod={deletingPod} />
+            <PodsTable pods={data.pods} onDelete={handleDelete} onViewLogs={handleViewLogs} deletingPod={deletingPod} />
           ) : (
             <p className="p-4 text-muted-foreground">Loading pods...</p>
           )}
         </CardContent>
       </Card>
+
+      {logsPod && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-medium">
+                Logs: {logsPod.namespace}/{logsPod.name}
+              </CardTitle>
+              <div className="flex gap-2">
+                {streaming ? (
+                  <Button variant="outline" size="xs" onClick={handleStopStream}>
+                    Stop
+                  </Button>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onClick={() => handleFollow(logsPod.namespace, logsPod.name)}
+                  >
+                    Follow
+                  </Button>
+                )}
+                <Button
+                  variant="outline"
+                  size="xs"
+                  onClick={() => handleViewLogs(logsPod.namespace, logsPod.name)}
+                >
+                  Refresh
+                </Button>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  onClick={() => { handleStopStream(); setLogsPod(null); setLogs(""); }}
+                >
+                  Close
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="max-h-96 overflow-auto rounded bg-muted p-3">
+              <pre className="text-xs whitespace-pre-wrap break-all">
+                {logs || "No logs available"}
+                <div ref={logsEndRef} />
+              </pre>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

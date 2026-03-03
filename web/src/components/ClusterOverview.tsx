@@ -1,16 +1,16 @@
-import { useEffect, useState } from "react";
+import { useSSEWithData } from "@/hooks/useSSE";
+import { useCallback, useEffect, useState } from "react";
 import { fetchCluster } from "../hooks/useApi";
 import type { ClusterResponse, GPU, NodeResponse } from "../types/api";
+import { Badge } from "./ui/badge";
 import {
   Card,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
-  CardDescription,
 } from "./ui/card";
 import { Progress } from "./ui/progress";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
-import { Badge } from "./ui/badge";
 import {
   Table,
   TableBody,
@@ -19,6 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from "./ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
 function timeAgo(dateStr: string): string {
   const seconds = Math.floor(
@@ -104,16 +105,18 @@ export default function ClusterOverview() {
   const [data, setData] = useState<ClusterResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const load = () => {
-      fetchCluster()
-        .then(setData)
-        .catch((e) => setError(e.message));
-    };
-    load();
-    const interval = setInterval(load, 5000);
-    return () => clearInterval(interval);
+  const load = useCallback(() => {
+    fetchCluster().then(setData).catch((e) => setError(e.message));
   }, []);
+
+  useEffect(() => { load(); }, [load]);
+  useSSEWithData<ClusterResponse>(['gpu-report'], (data) => setData(data));
+  useEffect(() => {
+    const id = setInterval(load, 300_000); // dis issa 5-min fallback
+    return () => clearInterval(id);
+  }, [load]);
+
+
 
   if (error) return <div className="text-destructive p-4">Error: {error}</div>;
   if (!data)

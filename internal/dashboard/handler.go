@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -40,42 +41,8 @@ func (h *Handler) ClusterHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	registryNodes := h.registry.GetAllNodes()
-	totalUtilization := 0
-	nodeResponses := []NodeResponse{}
-	clusterResponse := ClusterResponse{}
-	clusterSummary := ClusterSummary{
-		TotalNodes: len(registryNodes),
-	}
-	for _, node := range registryNodes {
-		nodeResponses = append(nodeResponses,
-			NodeResponse{
-				NodeGPUs: *node,
-			},
-		)
-		for _, gpu := range node.GPUs {
-			clusterSummary.TotalGPUs += 1
-			clusterSummary.TotalMemoryMB += gpu.TotalMemoryMB
-			if gpu.MPSEnabled {
-				clusterSummary.MPSGPUs++
-			} else {
-				clusterSummary.NonMPSGPUs++
-			}
-
-			if gpu.IsHealthy {
-				clusterSummary.HealthyGPUs += 1
-			}
-			clusterSummary.ReservedMemoryMB += h.registry.GetReservedMemory(node.NodeName, gpu.UUID)
-			totalUtilization += gpu.UtilizationGPU
-		}
-	}
-	if clusterSummary.TotalGPUs > 0 {
-		clusterSummary.AvgUtilization = float64(totalUtilization) / float64(clusterSummary.TotalGPUs)
-	}
-	clusterResponse.NodeResponse = nodeResponses
-	clusterResponse.ClusterSummary = clusterSummary
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(clusterResponse)
+	json.NewEncoder(w).Encode(h.BuildClusterResponse())
 
 }
 
@@ -320,4 +287,106 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/dashboard/pods/", h.DeletePodsHandler)
 	mux.HandleFunc("/api/v1/dashboard/events", h.EventHandler)
 	mux.HandleFunc("/api/v1/dashboard/config", h.ConfigHandler)
+	mux.HandleFunc("GET /api/v1/dashboard/pods/{namespace}/{name}/logs", h.PodLogsHandler)
+
+}
+
+func (h *Handler) BuildClusterResponse() ClusterResponse {
+	registryNodes := h.registry.GetAllNodes()
+	totalUtilization := 0
+	nodeResponses := []NodeResponse{}
+	clusterResponse := ClusterResponse{}
+	clusterSummary := ClusterSummary{
+		TotalNodes: len(registryNodes),
+	}
+
+	for _, node := range registryNodes {
+		nodeResponses = append(nodeResponses,
+			NodeResponse{
+				NodeGPUs: *node,
+			},
+		)
+		for _, gpu := range node.GPUs {
+			clusterSummary.TotalGPUs += 1
+			clusterSummary.TotalMemoryMB += gpu.TotalMemoryMB
+			if gpu.MPSEnabled {
+				clusterSummary.MPSGPUs++
+			} else {
+				clusterSummary.NonMPSGPUs++
+			}
+
+			if gpu.IsHealthy {
+				clusterSummary.HealthyGPUs += 1
+			}
+			clusterSummary.ReservedMemoryMB += h.registry.GetReservedMemory(node.NodeName, gpu.UUID)
+			totalUtilization += gpu.UtilizationGPU
+		}
+	}
+
+	if clusterSummary.TotalGPUs > 0 {
+		clusterSummary.AvgUtilization = float64(totalUtilization) / float64(clusterSummary.TotalGPUs)
+	}
+
+	clusterResponse.NodeResponse = nodeResponses
+	clusterResponse.ClusterSummary = clusterSummary
+	return clusterResponse
+}
+
+func (h *Handler) PodLogsHandler(w http.ResponseWriter, r *http.Request) {
+	namespace := r.PathValue("namespace")
+	name := r.PathValue("name")
+
+	tailLines := int64(100)
+	follow := false
+	// get tail length query param
+	if t := r.URL.Query().Get("tail"); t != "" {
+		if n, err := strconv.ParseInt(t, 10, 64); err == nil {
+			tailLines = n
+		}
+	}
+
+	if f := r.URL.Query().Get("follow"); f != "" {
+		if _f, err := strconv.ParseBool(f); err == nil {
+			follow = _f
+		}
+	}
+
+	logs := h.clientSet.CoreV1().Pods(namespace).GetLogs(name, &v1.PodLogOptions{
+		TailLines: &tailLines,
+		Follow:    follow,
+	})
+
+	stream, err := logs.Stream(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer stream.Close()
+	if follow {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		buf := make([]byte, 4096)
+		for {
+			n, err := stream.Read(buf)
+			if n > 0 {
+				w.Write(buf[:n])
+				flusher.Flush()
+			}
+			if err != nil {
+				return
+			}
+		}
+
+	} else {
+		w.Header().Set("Content-Type", "text/plain")
+		io.Copy(w, stream)
+	}
 }
