@@ -57,7 +57,18 @@ type Scheduler struct {
 	server        *http.Server
 	webhookServer *http.Server
 	eventBus      *dashboard.EventBus
+	dashHandler   *dashboard.Handler
 	stopCh        chan struct{}
+}
+type eventBusAdapter struct {
+	bus *dashboard.EventBus
+}
+
+func (a *eventBusAdapter) Publish(eventType string, data interface{}) {
+	a.bus.Publish(dashboard.SSEEvent{
+		Type: dashboard.SSEEventType(eventType),
+		Data: data,
+	})
 }
 
 func NewScheduler() (*Scheduler, error) {
@@ -126,6 +137,9 @@ func NewScheduler() (*Scheduler, error) {
 		} else {
 			strategy = allocator.NewFIFOScheduler()
 		}
+		eventBus := dashboard.NewEventBus()
+		publisher := &eventBusAdapter{bus: eventBus}
+
 		var preemptionOrch *scheduler.PreemptionOrchestrator
 		if cfg.Scheduler.PreemptionEnabled {
 			executor := scheduler.NewK8sExecutor(clientset, restConfig)
@@ -133,6 +147,7 @@ func NewScheduler() (*Scheduler, error) {
 				executor,
 				time.Duration(cfg.Scheduler.CheckpointTimeoutSeconds)*time.Second,
 				int64(cfg.Scheduler.PreemptionGracePeriod),
+				publisher,
 			)
 			log.Println("Preemption enabled")
 		}
@@ -148,6 +163,7 @@ func NewScheduler() (*Scheduler, error) {
 			cfg.Workflows,
 			*scheduler.NewGangCollector(time.Duration(cfg.Scheduler.GangTimeoutSeconds) * time.Second),
 			preemptionOrch,
+			publisher,
 			s.stopCh,
 		)
 		log.Println("Running in STANDALONE mode")
@@ -158,15 +174,13 @@ func NewScheduler() (*Scheduler, error) {
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		eventBus := dashboard.NewEventBus()
 		s.eventBus = eventBus
-		dashHandler := dashboard.NewHandler(registry, clientset, cfg, eventBus)
-		dashHandler.RegisterRoutes(mux)
+		s.dashHandler = dashboard.NewHandler(registry, clientset, cfg, eventBus)
+		s.dashHandler.RegisterRoutes(mux)
 		s.server = &http.Server{
 			Addr:    fmt.Sprintf(":%d", cfg.Scheduler.Port),
 			Handler: mux,
 		}
-
 		// Webhook HTTPS server (for mutating admission webhook)
 		webhookMux := http.NewServeMux()
 		webhookMux.HandleFunc("/mutate", scheduler.HandleMutate)
@@ -220,7 +234,7 @@ func (s *Scheduler) Run() error {
 		} else {
 			log.Println("No certs/tls.crt found, webhook server disabled")
 		}
-
+		go s.gpuReportBroadcastLoop()
 		s.watcher.Run() // This blocks
 		return nil
 	}
@@ -265,6 +279,26 @@ func (s *Scheduler) refreshLoop() {
 		}
 	}
 }
+
+func (s *Scheduler) gpuReportBroadcastLoop() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if s.eventBus != nil {
+				s.eventBus.Publish(dashboard.SSEEvent{
+					Type: dashboard.GPUReport,
+					Data: s.dashHandler.BuildClusterResponse(),
+				})
+			}
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
 func (s *Scheduler) registerGPUReportEndpoint(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/gpu-report", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

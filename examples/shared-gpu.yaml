@@ -23,7 +23,12 @@ spec:
             cudaError_t err = cudaMalloc(&ptr, bytes);
             if (err != cudaSuccess) { printf("cudaMalloc failed: %s\n", cudaGetErrorString(err)); return 1; }
             printf("shared-gpu-1: Allocated 1GB. Holding 180s...\n");
-            sleep(180);
+            fflush(stdout);
+            for (int i = 0; i < 36; i++) {
+                sleep(5);
+                printf("shared-gpu-1: still running... %d/180s elapsed\n", (i+1)*5);
+                fflush(stdout);
+            }
             cudaFree(ptr);
             return 0;
         }
@@ -59,7 +64,12 @@ spec:
             cudaError_t err = cudaMalloc(&ptr, bytes);
             if (err != cudaSuccess) { printf("cudaMalloc failed: %s\n", cudaGetErrorString(err)); return 1; }
             printf("shared-gpu-2: Allocated 1GB. Holding 180s...\n");
-            sleep(180);
+            fflush(stdout);
+            for (int i = 0; i < 36; i++) {
+                sleep(5);
+                printf("shared-gpu-2: still running... %d/180s elapsed\n", (i+1)*5);
+                fflush(stdout);
+            }
             cudaFree(ptr);
             return 0;
         }
