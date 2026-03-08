@@ -5,6 +5,7 @@ import type {
   CreatePodResponse,
   PodListResponse,
   SSEEvent,
+  SSEEventType,
 } from '../types/api';
 
 const API_BASE = '/api/v1/dashboard';
@@ -53,6 +54,59 @@ export function subscribeEvents(
   onEvent: (event: SSEEvent) => void,
 ): EventSource {
   const es = new EventSource(`${API_BASE}/events`);
-  es.onmessage = (e) => onEvent(JSON.parse(e.data));
-  return es; // caller can call es.close() to disconnect
+  const eventTypes = [
+    'pod-scheduled',
+    'preemption',
+    'gpu-report',
+    'pod-completed',
+    'pod-deleted',
+  ];
+  for (const type of eventTypes) {
+    es.addEventListener(type, (e) => {
+      onEvent({
+        sse_event_type: type as SSEEventType,
+        data: JSON.parse((e as MessageEvent).data),
+      });
+    });
+  }
+  return es;
+}
+
+export async function fetchPodLogs(
+  namespace: string,
+  name: string,
+  tail: number,
+): Promise<string> {
+  const url = `${API_BASE}/pods/${namespace}/${name}/logs?tail=${tail}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch logs: ${res.statusText}`);
+  return res.text();
+}
+
+export function streamPodLogs(
+  namespace: string,
+  name: string,
+  tail: number,
+  onChunk: (text: string) => void,
+): AbortController {
+  const url = `${API_BASE}/pods/${namespace}/${name}/logs?tail=${tail}&follow=true`;
+  const controller = new AbortController();
+
+  (async () => {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`Failed to stream logs: ${res.statusText}`);
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      onChunk(decoder.decode(value));
+    }
+  })().catch((err) => {
+    if (err.name !== 'AbortError') console.error('streamPodLogs error:', err);
+  });
+
+  return controller;
 }

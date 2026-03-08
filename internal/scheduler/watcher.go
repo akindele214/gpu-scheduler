@@ -35,10 +35,11 @@ type Watcher struct {
 	informerFactory        informers.SharedInformerFactory
 	gangCollector          GangCollector
 	preemptionOrchestrator *PreemptionOrchestrator
+	publisher              EventPublisher
 	pendingEvictions       map[string]time.Time // key: "namespace/name", tracks in-flight evictions
 }
 
-func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, registry *gpu.Registry, strategy allocator.SchedulingStrategy, alloc *allocator.Allocator, schedulerName string, pollInterval int, workflowCfg config.WorkflowConfig, gangCollector GangCollector, preemptionOrch *PreemptionOrchestrator, stopCh <-chan struct{}) *Watcher {
+func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, registry *gpu.Registry, strategy allocator.SchedulingStrategy, alloc *allocator.Allocator, schedulerName string, pollInterval int, workflowCfg config.WorkflowConfig, gangCollector GangCollector, preemptionOrch *PreemptionOrchestrator, publisher EventPublisher, stopCh <-chan struct{}) *Watcher {
 
 	factory := informers.NewSharedInformerFactory(client, 30*time.Second)
 
@@ -55,6 +56,11 @@ func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, registry 
 		preemptionOrchestrator: preemptionOrch,
 		pendingEvictions:       make(map[string]time.Time),
 	}
+	if publisher != nil {
+		watcher.publisher = publisher
+	} else {
+		watcher.publisher = noopPublisher{}
+	}
 	podInformer := factory.Core().V1().Pods().Informer()
 	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		UpdateFunc: func(oldObj, newObj interface{}) {
@@ -66,6 +72,10 @@ func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, registry 
 			if newPod.Status.Phase == corev1.PodSucceeded || newPod.Status.Phase == corev1.PodFailed {
 				log.Printf("[CLEANUP] Pod %s/%s completed (phase=%s), releasing GPU reservation", newPod.Namespace, newPod.Name, newPod.Status.Phase)
 				watcher.registry.ReleasePod(newPod.Namespace, newPod.Name)
+				watcher.publisher.Publish("pod-completed", map[string]string{
+					"pod": newPod.Name, "namespace": newPod.Namespace, "phase": string(newPod.Status.Phase),
+				})
+
 				delete(watcher.pendingEvictions, fmt.Sprintf("%s/%s", newPod.Namespace, newPod.Name))
 			}
 		},
@@ -90,6 +100,10 @@ func NewWatcher(client *kubernetes.Clientset, gpuManager *gpu.Manager, registry 
 			}
 			log.Printf("[CLEANUP] Pod %s/%s deleted, releasing GPU reservation", pod.Namespace, pod.Name)
 			watcher.registry.ReleasePod(pod.Namespace, pod.Name)
+			watcher.publisher.Publish("pod-deleted", map[string]string{
+				"pod": pod.Name, "namespace": pod.Namespace,
+			})
+
 			delete(watcher.pendingEvictions, fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
 		},
 	})
@@ -341,6 +355,10 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 	metrics.GPUJobsScheduled.WithLabelValues(nodeName).Inc()
 
 	log.Printf("Successfully scheduled pod %s/%s to node %s with GPUs: %s", pod.Namespace, pod.Name, nodeName, gpuAnnotation)
+	w.publisher.Publish("pod-scheduled", map[string]string{
+		"pod": pod.Name, "namespace": pod.Namespace,
+		"node": nodeName, "gpus": gpuAnnotation,
+	})
 
 }
 
@@ -441,6 +459,11 @@ func (w *Watcher) scheduleGang(gang GangState) {
 
 	metrics.GangSchedulingAttempts.WithLabelValues(gang.GangID, "success").Inc()
 	log.Printf("[GANG] Successfully scheduled gang %s (%d pods)", gang.GangID, gang.Size)
+
+	w.publisher.Publish("pod-scheduled", map[string]string{
+		"gang_id": gang.GangID, "size": fmt.Sprintf("%d", gang.Size),
+	})
+
 }
 
 func (w *Watcher) buildPreemptionCandidates(requester *corev1.Pod) []PreemptionCandidate {
