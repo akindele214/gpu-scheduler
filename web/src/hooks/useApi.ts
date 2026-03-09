@@ -3,6 +3,8 @@ import type {
   ConfigResponse,
   CreatePodRequest,
   CreatePodResponse,
+  LogEntry,
+  LogResponse,
   PodListResponse,
   SSEEvent,
   SSEEventType,
@@ -109,4 +111,21 @@ export function streamPodLogs(
   });
 
   return controller;
+}
+
+export async function fetchLogs(category?: string, limit?: number): Promise<LogResponse> {
+  const params = new URLSearchParams();
+  if (category) params.set('category', category);
+  if (limit) params.set('limit', limit.toString());
+  const res = await fetch(`${API_BASE}/logs?${params}`);
+  if (!res.ok) throw new Error(`Failed to fetch logs: ${res.statusText}`);
+  return res.json();
+}
+
+export function subscribeLogEvents(onLog: (entry: LogEntry) => void): EventSource {
+  const es = new EventSource(`${API_BASE}/events`);
+  es.addEventListener('scheduler-log', (e) => {
+    onLog(JSON.parse((e as MessageEvent).data));
+  });
+  return es;
 }

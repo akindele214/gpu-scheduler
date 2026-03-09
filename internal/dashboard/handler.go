@@ -25,14 +25,16 @@ type Handler struct {
 	clientSet kubernetes.Interface
 	config    *config.Config
 	eventBus  *EventBus
+	logBuffer *LogBuffer
 }
 
-func NewHandler(registry *gpu.Registry, clientset kubernetes.Interface, config *config.Config, eventBus *EventBus) *Handler {
+func NewHandler(registry *gpu.Registry, clientset kubernetes.Interface, config *config.Config, eventBus *EventBus, logBuffer *LogBuffer) *Handler {
 	return &Handler{
 		registry:  registry,
 		clientSet: clientset,
 		config:    config,
 		eventBus:  eventBus,
+		logBuffer: logBuffer,
 	}
 }
 
@@ -90,6 +92,8 @@ func (h *Handler) PodsHandler(w http.ResponseWriter, r *http.Request) {
 					Preemptible:  scheduler.IsPreemptible(&pod, h.config.Workflows),
 					GangID:       scheduler.GetGangIDFromPod(&pod),
 					AssignedGPUs: scheduler.GetAssignedGPUS(&pod),
+					AutoResume:   scheduler.GetAutoResumeFromPod(&pod),
+					ResumeCmd:    scheduler.GetResumeCmdFromPod(&pod),
 				})
 				switch podPhase {
 				case v1.PodRunning:
@@ -143,6 +147,12 @@ func (h *Handler) PodsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if podRequest.CheckpointCmd != "" {
 			annotations["gpu-scheduler/checkpoint-cmd"] = podRequest.CheckpointCmd
+		}
+		if podRequest.AutoResume {
+			annotations["gpu-scheduler/auto-resume"] = "true"
+		}
+		if podRequest.ResumeCmd != "" {
+			annotations["gpu-scheduler/resume-cmd"] = podRequest.ResumeCmd
 		}
 
 		restartPolicy := v1.RestartPolicyNever
@@ -288,7 +298,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/dashboard/events", h.EventHandler)
 	mux.HandleFunc("/api/v1/dashboard/config", h.ConfigHandler)
 	mux.HandleFunc("GET /api/v1/dashboard/pods/{namespace}/{name}/logs", h.PodLogsHandler)
-
+	mux.HandleFunc("/api/v1/dashboard/logs", h.LogsHandler)
 }
 
 func (h *Handler) BuildClusterResponse() ClusterResponse {
@@ -330,6 +340,23 @@ func (h *Handler) BuildClusterResponse() ClusterResponse {
 	clusterResponse.NodeResponse = nodeResponses
 	clusterResponse.ClusterSummary = clusterSummary
 	return clusterResponse
+}
+
+func (h *Handler) LogsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	category := r.URL.Query().Get("category")
+	limit := 200
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	entries := h.logBuffer.GetRecent(limit, category)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(LogResponse{Entries: entries, Total: len(entries)})
 }
 
 func (h *Handler) PodLogsHandler(w http.ResponseWriter, r *http.Request) {

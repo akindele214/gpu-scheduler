@@ -6,6 +6,8 @@ scheduler:
   preemptionEnabled: true
   checkpointTimeoutSeconds: 60
   preemptionGracePeriod: 30
+  autoResumeMaxRetries: 3
+  autoResumePriorityBoost: 5
 
 queue:
   maxSize: 1000

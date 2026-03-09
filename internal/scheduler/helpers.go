@@ -178,3 +178,33 @@ func IsPreemptible(pod *corev1.Pod, workflowCfg config.WorkflowConfig) bool {
 	}
 	return false
 }
+
+func GetAutoResumeFromPod(pod *corev1.Pod) bool {
+	value, exists := pod.Annotations["gpu-scheduler/auto-resume"]
+	if exists {
+		return value == "true"
+	}
+	return false
+}
+
+func GetPreemptCountFromPod(pod *corev1.Pod) int {
+	value, exists := pod.Annotations["gpu-scheduler/preempt-count"]
+	if exists {
+		count, err := strconv.Atoi(value)
+		if err == nil {
+			return count
+		}
+	}
+	return 0
+}
+
+func GetOriginalPriorityFromPod(pod *corev1.Pod) int {
+	value, exists := pod.Annotations["gpu-scheduler/original-priority"]
+	if exists {
+		priority, err := strconv.Atoi(value)
+		if err == nil {
+			return priority
+		}
+	}
+	return -1
+}

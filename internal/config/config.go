@@ -20,6 +20,8 @@ type SchedulerConfig struct {
 	PreemptionEnabled        bool   `mapstructure:"preemptionEnabled" json:"preemption_enabled"`
 	CheckpointTimeoutSeconds int    `mapstructure:"checkpointTimeoutSeconds" json:"checkpoint_timeout_seconds"`
 	PreemptionGracePeriod    int    `mapstructure:"preemptionGracePeriod" json:"preemption_grace_period"`
+	AutoResumeMaxRetries     int    `mapstructure:"autoResumeMaxRetries" json:"auto_resume_max_retries"`
+	AutoResumePriorityBoost  int    `mapstructure:"autoResumePriorityBoost" json:"auto_resume_priority_boost"`
 }
 
 type WorkFlowTypeConfig struct {

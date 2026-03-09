@@ -158,7 +158,7 @@ func (r *Registry) FindAvailableNonMPSGPU(minMemoryMB int) []GPUCandidate {
 	all := r.FindAvailableFullGPU(minMemoryMB)
 	var nonMPS []GPUCandidate
 	for _, c := range all {
-		if !c.MPSEnabled {
+		if !c.MPSEnabled && c.PodCount == 0 {
 			nonMPS = append(nonMPS, c)
 		}
 	}
