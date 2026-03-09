@@ -102,12 +102,27 @@ export interface PodListResponse {
   failed_count: number;
 }
 
+export interface LogEntry {
+  timestamp: string;
+  category: string;
+  message: string;
+  raw: string;
+}
+
+export interface LogResponse {
+  entries: LogEntry[];
+  total: number;
+}
+
 export type SSEEventType =
   | 'pod-scheduled'
   | 'preemption'
   | 'gpu-report'
   | 'pod-completed'
-  | 'pod-deleted';
+  | 'pod-deleted'
+  | 'pod-preempted'
+  | 'pod-resumed'
+  | 'scheduler-log';
 
 export interface SSEEvent<T = unknown> {
   sse_event_type: SSEEventType;

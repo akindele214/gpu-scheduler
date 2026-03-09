@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -59,16 +60,6 @@ type Scheduler struct {
 	eventBus      *dashboard.EventBus
 	dashHandler   *dashboard.Handler
 	stopCh        chan struct{}
-}
-type eventBusAdapter struct {
-	bus *dashboard.EventBus
-}
-
-func (a *eventBusAdapter) Publish(eventType string, data interface{}) {
-	a.bus.Publish(dashboard.SSEEvent{
-		Type: dashboard.SSEEventType(eventType),
-		Data: data,
-	})
 }
 
 func NewScheduler() (*Scheduler, error) {
@@ -140,15 +131,24 @@ func NewScheduler() (*Scheduler, error) {
 		eventBus := dashboard.NewEventBus()
 		publisher := &eventBusAdapter{bus: eventBus}
 
+		// Create EventBus early so preemption orchestrator can publish events
+		// eventBus := dashboard.NewEventBus()
+		s.eventBus = eventBus
+
 		var preemptionOrch *scheduler.PreemptionOrchestrator
 		if cfg.Scheduler.PreemptionEnabled {
 			executor := scheduler.NewK8sExecutor(clientset, restConfig)
-			preemptionOrch = scheduler.NewPreemptionOrchestrator(
-				executor,
-				time.Duration(cfg.Scheduler.CheckpointTimeoutSeconds)*time.Second,
-				int64(cfg.Scheduler.PreemptionGracePeriod),
-				publisher,
-			)
+
+			preemptionOrch = scheduler.NewPreemptionOrchestrator(scheduler.PreemptionConfig{
+				Executor:          executor,
+				CheckpointTimeout: time.Duration(cfg.Scheduler.CheckpointTimeoutSeconds) * time.Second,
+				GracePeriod:       int64(cfg.Scheduler.PreemptionGracePeriod),
+				MaxRetries:        cfg.Scheduler.AutoResumeMaxRetries,
+				PriorityBoost:     cfg.Scheduler.AutoResumePriorityBoost,
+				SchedulerName:     cfg.Scheduler.Name,
+				WorkflowCfg:       cfg.Workflows,
+				Publisher:         &eventBusAdapter{bus: eventBus},
+			})
 			log.Println("Preemption enabled")
 		}
 
@@ -175,7 +175,9 @@ func NewScheduler() (*Scheduler, error) {
 			w.WriteHeader(http.StatusOK)
 		})
 		s.eventBus = eventBus
-		s.dashHandler = dashboard.NewHandler(registry, clientset, cfg, eventBus)
+		logBuffer := dashboard.NewLogBuffer(1000, eventBus)
+		log.SetOutput(io.MultiWriter(os.Stderr, logBuffer))
+		s.dashHandler = dashboard.NewHandler(registry, clientset, cfg, eventBus, logBuffer)
 		s.dashHandler.RegisterRoutes(mux)
 		s.server = &http.Server{
 			Addr:    fmt.Sprintf(":%d", cfg.Scheduler.Port),
@@ -362,4 +364,15 @@ func buildKubeClient() (kubernetes.Interface, *rest.Config, error) {
 	// No cluster available — return nil client for local testing
 	log.Println("Warning: No Kubernetes cluster available. Running in standalone mode.")
 	return nil, nil, nil
+}
+
+type eventBusAdapter struct {
+	bus *dashboard.EventBus
+}
+
+func (a *eventBusAdapter) Publish(eventType string, data interface{}) {
+	a.bus.Publish(dashboard.SSEEvent{
+		Type: dashboard.SSEEventType(eventType),
+		Data: data,
+	})
 }

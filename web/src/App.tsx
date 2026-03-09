@@ -1,6 +1,7 @@
 import ClusterOverview from "./components/ClusterOverview";
 import PodsSection from "./components/PodsSection";
 import ConfigSection from "./components/ConfigSection";
+import LogViewer from "./components/LogViewer";
 
 function App() {
   return (
@@ -12,6 +13,7 @@ function App() {
         <ClusterOverview />
         <PodsSection />
         <ConfigSection />
+        <LogViewer />
       </main>
     </div>
   );

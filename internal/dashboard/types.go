@@ -41,6 +41,8 @@ type CreatePodRequest struct {
 	GangSize      int                `json:"gang_size"`
 	CheckpointCmd string             `json:"check_point_cmd"`
 	RestartPolicy string             `json:"restart_policy"`
+	ResumeCmd     string             `json:"resume_cmd"`
+	AutoResume    bool               `json:"auto_resume"`
 	MemoryMode    types.MemoryMode   `json:"memory_mode"`
 }
 
@@ -53,16 +55,18 @@ type CreatePodResponse struct {
 type PodResponse struct {
 	Name         string   `json:"name"`
 	Namespace    string   `json:"namespace"`
-	Phase        string   `json:"phase"`         // Pending, Running, Succeeded, Failed
-	NodeName     string   `json:"node_name"`     // which node it's on
-	CreatedAt    string   `json:"created_at"`    // pod creation timestamp
-	MemoryMB     int      `json:"memory_mb"`     // from gpu-scheduler/memory-mb annotation
-	GPUCount     int      `json:"gpu_count"`     // from gpu-scheduler/gpu-count annotation
-	Workflow     string   `json:"workflow"`      // training, inference, build
-	Priority     int      `json:"priority"`      // from gpu-scheduler/priority annotation
-	Shared       bool     `json:"shared"`        // from gpu-scheduler/shared annotation
-	Preemptible  bool     `json:"preemptible"`   // from gpu-scheduler/preemptible annotation
-	GangID       string   `json:"gang_id"`       // from gpu-scheduler/gang-id annotation
+	Phase        string   `json:"phase"`       // Pending, Running, Succeeded, Failed
+	NodeName     string   `json:"node_name"`   // which node it's on
+	CreatedAt    string   `json:"created_at"`  // pod creation timestamp
+	MemoryMB     int      `json:"memory_mb"`   // from gpu-scheduler/memory-mb annotation
+	GPUCount     int      `json:"gpu_count"`   // from gpu-scheduler/gpu-count annotation
+	Workflow     string   `json:"workflow"`    // training, inference, build
+	Priority     int      `json:"priority"`    // from gpu-scheduler/priority annotation
+	Shared       bool     `json:"shared"`      // from gpu-scheduler/shared annotation
+	Preemptible  bool     `json:"preemptible"` // from gpu-scheduler/preemptible annotation
+	GangID       string   `json:"gang_id"`     // from gpu-scheduler/gang-id annotation
+	AutoResume   bool     `json:"auto_resume"`
+	ResumeCmd    string   `json:"resume_cmd"`
 	AssignedGPUs []string `json:"assigned_gpus"` // from gpu-scheduler/assigned-gpus annotation
 }
 
@@ -83,9 +87,17 @@ const (
 	GPUReport    SSEEventType = "gpu-report"
 	PodCompleted SSEEventType = "pod-completed"
 	PodDeleted   SSEEventType = "pod-deleted"
+	PodPreempted SSEEventType = "pod-preempted"
+	PodResumed   SSEEventType = "pod-resumed"
+	SchedulerLog SSEEventType = "scheduler-log"
 )
 
 type SSEEvent struct {
 	Type SSEEventType `json:"sse_event_type"`
 	Data interface{}  `json:"data"`
+}
+
+type LogResponse struct {
+	Entries []LogEntry `json:"entries"`
+	Total   int        `json:"total"`
 }

@@ -153,16 +153,29 @@ A Kubernetes-native GPU scheduler that provides memory-aware allocation, gang sc
 5. DELETE each victim
    - Deletes pod with gracePeriodSeconds
    - Adds to pendingEvictions map (prevents re-eviction)
+   - Publishes "pod-preempted" SSE event
         │
         ▼
-6. INFORMER fires DeleteFunc
+6. AUTO-RESUME (if enabled)
+   - Checks gpu-scheduler/auto-resume: "true" annotation
+   - Checks preempt-count < autoResumeMaxRetries
+   - Creates new pod with:
+     • Name: <original>-resume-<count> (strips prior -resume-N suffix)
+     • Boosted priority: original + (boost × count), capped at 100
+     • Preferred node affinity for checkpoint data locality
+     • Runtime annotations stripped (assigned-gpus, allocation-type)
+   - Publishes "pod-resumed" SSE event
+        │
+        ▼
+7. INFORMER fires DeleteFunc
    - Registry.ReleasePod() frees the GPU memory
    - Removes from pendingEvictions map
         │
         ▼
-7. NEXT CYCLE: high-priority pod retries
+8. NEXT CYCLE: high-priority pod retries + resumed pod queues
    - GPU now has free memory
-   - Schedules normally through steps 3-7 of standard flow
+   - High-priority pod schedules normally
+   - Resumed pod waits in pending until resources are available
 ```
 
 ### Shared GPU Flow
@@ -276,7 +289,8 @@ When a high-priority pod can't be scheduled:
 1. **VictimSelector**: Finds the minimal set of lower-priority, preemptible pods to evict
 2. **Checkpoint**: Executes the victim's `gpu-scheduler/checkpoint-cmd` annotation via `kubectl exec`
 3. **Delete**: Removes the victim pod with a grace period
-4. **Retry**: Scheduler retries the requester on the next cycle
+4. **Auto-Resume**: If the victim has `auto-resume: "true"`, creates a new pod with boosted priority
+5. **Retry**: Scheduler retries the requester on the next cycle
 
 Rules:
 
@@ -284,6 +298,15 @@ Rules:
 - Only preempt pods with strictly lower priority
 - Pods must have `gpu-scheduler/preemptible: "true"` annotation
 - Eviction dedup prevents repeated preemption of the same pod
+
+Auto-Resume:
+
+- Opted in via `gpu-scheduler/auto-resume: "true"` annotation
+- Resumed pods get priority boost: `original + (autoResumePriorityBoost × preemptCount)`, capped at 100
+- Original priority is preserved in `gpu-scheduler/original-priority` annotation
+- Stops after `autoResumeMaxRetries` preemptions (default: 3)
+- Resumed pods prefer the same node (for checkpoint data locality) via preferred node affinity
+- Events published to SSE bus: `pod-preempted`, `pod-resumed`
 
 ### PodExecutor (`internal/scheduler/executor.go`)
 
@@ -293,6 +316,7 @@ Interface for executing commands in pods and deleting pods. The `K8sExecutor` im
 type PodExecutor interface {
     ExecInPod(ctx, namespace, podName, container string, cmd []string) error
     DeletePod(ctx, namespace, podName string, gracePeriodSeconds int64) error
+    CreatePod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error)
 }
 ```
 
@@ -345,6 +369,11 @@ metadata:
     gpu-scheduler/preemptible: "true"     # Can this pod be evicted?
     gpu-scheduler/checkpoint-cmd: "..."   # Command to run before eviction
     gpu-scheduler/resume-cmd: "..."       # Command to run on restart
+    gpu-scheduler/auto-resume: "true"     # Auto-recreate pod after preemption
+
+    # Auto-Resume (set by scheduler, read-only)
+    gpu-scheduler/preempt-count: "1"      # Times this pod has been preempted
+    gpu-scheduler/original-priority: "50" # Priority before any boost
 
 spec:
   schedulerName: gpu-scheduler            # Required
@@ -399,7 +428,8 @@ gpu-scheduler/
 │   ├── single-node-gang/        # 4x GPU single node demo
 │   ├── multi-node-gang/         # Cross-node gang demo
 │   ├── priority-test/           # Preemption test pods
-│   └── shared-gpu.yaml          # Shared GPU demo
+│   ├── shared-gpu.yaml          # Shared GPU demo
+│   └── preemption-auto-resume.yaml # Preemption + auto-resume demo
 ├── scripts/
 │   ├── setup-k3s-worker.sh      # k3s worker setup
 │   └── deploy-agent.sh          # GPU agent deployment
@@ -417,6 +447,8 @@ scheduler:
   preemptionEnabled: true
   checkpointTimeoutSeconds: 60
   preemptionGracePeriod: 30
+  autoResumeMaxRetries: 3
+  autoResumePriorityBoost: 5
   gangTimeoutSeconds: 300
 
 queue:
