@@ -151,6 +151,27 @@ func (w *Watcher) processQueue() {
 	if len(pendingPods) == 0 {
 		return
 	}
+
+	// Wait for evicted pods to fully terminate so the device plugin
+	// can reclaim GPU resources before we attempt new scheduling.
+	for key := range w.pendingEvictions {
+		// Check if the evicted pod still exists in the cluster
+		stillExists := false
+		for _, pod := range pods.Items {
+			podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+			if podKey == key {
+				stillExists = true
+				break
+			}
+		}
+		if stillExists {
+			log.Printf("[SCHEDULE] Deferring scheduling: evicted pod %s still terminating", key)
+			return
+		}
+		// Pod is gone, safe to proceed
+		delete(w.pendingEvictions, key)
+	}
+
 	type podWithPriority struct {
 		pod      *corev1.Pod
 		priority int
@@ -237,6 +258,7 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 					log.Printf("[PREEMPT] No preemption possible for %s/%s: %v", pod.Namespace, pod.Name, preemptErr)
 				} else {
 					for _, v := range victims {
+						w.registry.ReleasePod(v.Pod.Namespace, v.Pod.Name)
 						w.pendingEvictions[fmt.Sprintf("%s/%s", v.Pod.Namespace, v.Pod.Name)] = time.Now()
 					}
 					log.Printf("[PREEMPT] Evicted %d pod(s) for %s/%s, will retry on next cycle", len(victims), pod.Namespace, pod.Name)
@@ -257,6 +279,7 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 					return
 				}
 				for _, v := range victims {
+					w.registry.ReleasePod(v.Pod.Namespace, v.Pod.Name)
 					w.pendingEvictions[fmt.Sprintf("%s/%s", v.Pod.Namespace, v.Pod.Name)] = time.Now()
 				}
 				log.Printf("[PREEMPT] Evicted %d pod(s) for %s/%s, will retry on next cycle", len(victims), pod.Namespace, pod.Name)
@@ -288,6 +311,7 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 					log.Printf("[PREEMPT] No preemption possible for %s/%s: %v", pod.Namespace, pod.Name, preemptErr)
 				} else {
 					for _, v := range victims {
+						w.registry.ReleasePod(v.Pod.Namespace, v.Pod.Name)
 						w.pendingEvictions[fmt.Sprintf("%s/%s", v.Pod.Namespace, v.Pod.Name)] = time.Now()
 					}
 					log.Printf("[PREEMPT] Evicted %d pod(s) for %s/%s, will retry on next cycle", len(victims), pod.Namespace, pod.Name)

@@ -1,6 +1,7 @@
 import { useSSE } from "@/hooks/useSSE";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPod, deletePod, fetchPodLogs, fetchPods, streamPodLogs } from "../hooks/useApi";
+import LogPanel from "./LogPanel";
 import type {
   CreatePodRequest,
   PodListResponse,
@@ -393,7 +394,6 @@ export default function PodsSection() {
   const [logs, setLogs] = useState("");
   const [streaming, setStreaming] = useState(false)
   const controllerRef = useRef<AbortController | null>(null)
-  const logsEndRef = useRef<HTMLDivElement |null>(null)
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [deletingPod, setDeletingPod] = useState<string | null>(null);
@@ -443,10 +443,6 @@ export default function PodsSection() {
     controllerRef.current?.abort()
     setStreaming(false)
   }
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs]);
-
   if (error) return <div className="text-destructive p-4">Error: {error}</div>;
 
   return (
@@ -489,52 +485,15 @@ export default function PodsSection() {
       </Card>
 
       {logsPod && (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-medium">
-                Logs: {logsPod.namespace}/{logsPod.name}
-              </CardTitle>
-              <div className="flex gap-2">
-                {streaming ? (
-                  <Button variant="outline" size="xs" onClick={handleStopStream}>
-                    Stop
-                  </Button>
-                ) : (
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    onClick={() => handleFollow(logsPod.namespace, logsPod.name)}
-                  >
-                    Follow
-                  </Button>
-                )}
-                <Button
-                  variant="outline"
-                  size="xs"
-                  onClick={() => handleViewLogs(logsPod.namespace, logsPod.name)}
-                >
-                  Refresh
-                </Button>
-                <Button
-                  variant="outline"
-                  size="xs"
-                  onClick={() => { handleStopStream(); setLogsPod(null); setLogs(""); }}
-                >
-                  Close
-                </Button>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="max-h-96 overflow-auto rounded bg-muted p-3">
-              <pre className="text-xs whitespace-pre-wrap break-all">
-                {logs || "No logs available"}
-                <div ref={logsEndRef} />
-              </pre>
-            </div>
-          </CardContent>
-        </Card>
+        <LogPanel
+          title={`Logs: ${logsPod.namespace}/${logsPod.name}`}
+          logs={logs}
+          streaming={streaming}
+          onFollow={() => handleFollow(logsPod.namespace, logsPod.name)}
+          onStop={handleStopStream}
+          onRefresh={() => handleViewLogs(logsPod.namespace, logsPod.name)}
+          onClose={() => { handleStopStream(); setLogsPod(null); setLogs(""); }}
+        />
       )}
     </div>
   );

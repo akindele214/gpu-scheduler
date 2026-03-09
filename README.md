@@ -7,17 +7,32 @@
 
 ## Overview
 
-**GPU-Scheduler** is a Kubernetes-native scheduler built in Go for optimizing GPU resource allocation in AI/ML workloads. It provides memory-aware bin-packing, gang scheduling for distributed training, priority preemption with checkpointing, shared GPU support, and MIG routing — features that the default Kubernetes scheduler lacks.
+**GPU-Scheduler** is an open-source, lightweight Kubernetes GPU scheduler for teams sharing GPUs. Drop it into any k3s/kubeadm cluster and get memory-aware scheduling, GPU sharing, preemption with checkpoint/auto-resume, and a real-time dashboard — no CRDs, no operator, no vendor lock-in.
+
+### Who Is This For?
+
+- **ML/AI teams (5-20 engineers)** sharing 2-16 GPUs and tired of manual coordination
+- **Research labs** that need fair GPU access without the overhead of Slurm or Run:ai
+- **Startups** running fine-tuning and inference on-prem or on cloud GPU instances
+- Anyone who's hit the limits of the default Kubernetes scheduler with GPU workloads
 
 ### What It Does
 
-- **Memory-aware scheduling**: Tracks GPU memory at the MB level, not just GPU count
+- **Memory-aware scheduling**: Tracks GPU memory at the MB level, not just GPU count — no more wasted capacity
 - **Gang scheduling**: Atomic all-or-nothing placement of distributed training pods (e.g., PyTorch DDP) across multiple nodes
 - **Priority preemption with auto-resume**: High-priority jobs checkpoint and evict lower-priority workloads, which are automatically re-queued with boosted priority
-- **Shared GPU**: Multiple pods share a single GPU with memory isolation via a mutating webhook
+- **Shared GPU (MPS)**: Multiple pods share a single GPU with driver-level memory isolation via NVIDIA MPS
 - **MIG routing**: Automatically routes jobs to MIG instances or full GPUs based on pod annotations
+- **Real-time dashboard**: Web UI with cluster overview, pod submission, GPU utilization, scheduler logs, and pod log streaming
 - **Live GPU telemetry**: Per-node GPU agent reports real memory/utilization via NVML every 5 seconds
 - **Cross-node support**: Schedule gang jobs across geographically distributed nodes (tested with Tailscale)
+
+### Tested On
+
+- Single-node: 4x RTX 4090 (Vast.ai)
+- Multi-node: RTX 3060 + RTX 4060 across Tailscale mesh
+- MPS shared GPU: 2 pods on RTX 3060 with EXCLUSIVE_PROCESS mode
+- Preemption with auto-resume: checkpoint → evict → re-queue → resume on RTX 3060
 
 ## Quick Start
 
@@ -82,6 +97,18 @@ spec:
 ```bash
 kubectl apply -f my-job.yaml
 ```
+
+## Dashboard
+
+The scheduler includes an embedded web dashboard (React + Tailwind, served from the Go binary) accessible at `http://<scheduler-host>:8888`:
+
+- **Cluster overview**: Real-time GPU utilization, memory, MPS status per node
+- **Pod management**: View running/pending/completed pods, submit new pods via the UI
+- **Scheduler logs**: Live-streamed logs with category filtering (SCHEDULE, PREEMPT, AUTO-RESUME, etc.)
+- **Pod logs**: Stream container logs directly from the dashboard
+- **Configuration**: View active scheduler config
+
+No separate frontend deployment needed — it's compiled into the scheduler binary.
 
 ## Features
 
@@ -277,34 +304,25 @@ go test ./internal/allocator/...
 go test ./internal/scheduler/...
 ```
 
-## The Problem We're Solving
+## Why Not Just Use...
 
-GPUs are the backbone of modern AI but are notoriously inefficient in Kubernetes:
+| | Default kube-scheduler | Slurm | Volcano | Run:ai / NVIDIA KAI | **GPU-Scheduler** |
+|--|----------------------|-------|---------|---------------------|-------------------|
+| GPU memory tracking | None | Basic | Basic | Deep | Per-MB via NVML |
+| Gang scheduling | No | Yes | Yes (CRDs) | Yes | Yes (annotations) |
+| Preemption + auto-resume | No | No | No | Yes | Yes + checkpoint |
+| Shared GPU (MPS) | No | No | No | Yes | Yes (webhook) |
+| MIG routing | No | No | No | Yes | Yes |
+| Dashboard UI | No | CLI | No | Yes | Yes (embedded) |
+| Setup complexity | Low | High | High (CRDs, operators) | High (proprietary) | Low (2 binaries) |
+| License | Apache 2.0 | GPL | Apache 2.0 | Proprietary | Apache 2.0 |
 
-- **Low utilization**: Default schedulers treat GPUs as opaque, indivisible resources (30-60% average utilization)
-- **Fragmentation**: Unused memory slivers that can't be allocated
-- **No coordination**: Distributed training jobs get partial placements, wasting resources
-- **No preemption**: Low-priority jobs hold GPUs hostage from critical workloads
-- **No sharing**: One pod per GPU even when it only needs 2GB of a 24GB card
+**TL;DR**: You get Run:ai-level features without the enterprise sales call. Two binaries, pod annotations, done.
 
-GPU-Scheduler addresses all of these with memory-level tracking, gang scheduling, preemption, and shared GPU support.
+## Contributing
 
-### How It Differs
-
-| Aspect | Default kube-scheduler | Volcano | NVIDIA KAI | **GPU-Scheduler** |
-|--------|----------------------|---------|------------|-------------------|
-| GPU memory tracking | None | Basic | Deep | Per-MB tracking |
-| Gang scheduling | No | Yes (CRDs) | Yes | Yes (annotations) |
-| Preemption + auto-resume | No | No | Yes | Yes |
-| Shared GPU | No | No | Yes | Yes (webhook) |
-| MIG routing | No | No | Yes | Yes |
-| Complexity | Low | High | High | Low (annotations) |
-| License | Apache 2.0 | Apache 2.0 | Proprietary | Apache 2.0 |
+Issues and PRs welcome. See [ARCHITECTURE.md](ARCHITECTURE.md) for the system design.
 
 ## License
 
 Apache 2.0 - See [LICENSE](LICENSE) for details.
-
-## Acknowledgments
-
-Inspired by NVIDIA KAI (via Run:AI), Volcano, and the Kubernetes scheduling framework.
