@@ -13,7 +13,7 @@
 
 - **Memory-aware scheduling**: Tracks GPU memory at the MB level, not just GPU count
 - **Gang scheduling**: Atomic all-or-nothing placement of distributed training pods (e.g., PyTorch DDP) across multiple nodes
-- **Priority preemption**: High-priority jobs checkpoint and evict lower-priority workloads, then take their GPUs
+- **Priority preemption with auto-resume**: High-priority jobs checkpoint and evict lower-priority workloads, which are automatically re-queued with boosted priority
 - **Shared GPU**: Multiple pods share a single GPU with memory isolation via a mutating webhook
 - **MIG routing**: Automatically routes jobs to MIG instances or full GPUs based on pod annotations
 - **Live GPU telemetry**: Per-node GPU agent reports real memory/utilization via NVML every 5 seconds
@@ -102,30 +102,38 @@ metadata:
 
 The scheduler waits until all 4 pods in the gang are pending, then places them atomically across available nodes. Tested on single-node (4x RTX 4090) and multi-node (RTX 3060 + RTX 4060 via Tailscale).
 
-### Priority Preemption with Checkpointing
+### Priority Preemption with Auto-Resume
 
 When a high-priority pod can't be scheduled, the scheduler:
 
 1. Finds the minimal set of lower-priority, preemptible victims
 2. Executes each victim's checkpoint command (saves state)
 3. Deletes the victim pod
-4. Schedules the high-priority pod on the freed GPU
+4. Auto-resumes the victim as a new pod with boosted priority
+5. Schedules the high-priority pod on the freed GPU
+
+Evicted pods with `auto-resume: "true"` are automatically re-created with:
+- Incremented priority (`original + boost × preemptCount`, capped at 100)
+- Preferred node affinity for checkpoint data locality
+- Preempt counter to stop after max retries (default: 3)
 
 ```yaml
-# High-priority inference pod
-metadata:
-  annotations:
-    gpu-scheduler/memory-mb: "20000"
-    gpu-scheduler/workflow: "build"
-    gpu-scheduler/priority: "95"
-
-# Low-priority training pod (can be evicted)
+# Low-priority training pod (can be evicted and auto-resumed)
 metadata:
   annotations:
     gpu-scheduler/memory-mb: "20000"
     gpu-scheduler/workflow: "training"
     gpu-scheduler/preemptible: "true"
+    gpu-scheduler/auto-resume: "true"
     gpu-scheduler/checkpoint-cmd: "python save_checkpoint.py"
+    gpu-scheduler/resume-cmd: "python restore_checkpoint.py"
+
+# High-priority inference pod (triggers preemption)
+metadata:
+  annotations:
+    gpu-scheduler/memory-mb: "20000"
+    gpu-scheduler/workflow: "build"
+    gpu-scheduler/priority: "95"
 ```
 
 ### Shared GPU
@@ -200,7 +208,9 @@ metadata:
 | `gpu-scheduler/gang-id` | `"job-001"` | Gang group identifier |
 | `gpu-scheduler/gang-size` | `"4"` | Total pods in the gang |
 | `gpu-scheduler/preemptible` | `"true"` | Allow preemption |
+| `gpu-scheduler/auto-resume` | `"true"` | Auto-recreate pod after preemption |
 | `gpu-scheduler/checkpoint-cmd` | `"python save.py"` | Run before eviction |
+| `gpu-scheduler/resume-cmd` | `"python restore.py"` | Command to resume from checkpoint |
 
 ## Configuration
 
@@ -213,6 +223,8 @@ scheduler:
   preemptionEnabled: true
   checkpointTimeoutSeconds: 60
   preemptionGracePeriod: 30
+  autoResumeMaxRetries: 3
+  autoResumePriorityBoost: 5
 
 queue:
   defaultPolicy: "binpack"
@@ -241,6 +253,7 @@ workflows:
 | [multi-node-gang/](examples/multi-node-gang/) | 2-worker gang across nodes via Tailscale |
 | [priority-test/](examples/priority-test/) | Low-priority + high-priority preemption demo |
 | [shared-gpu.yaml](examples/shared-gpu.yaml) | Two pods sharing one GPU |
+| [preemption-auto-resume.yaml](examples/preemption-auto-resume.yaml) | Preemption with auto-resume demo |
 
 ## Architecture
 
@@ -249,7 +262,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design, component det
 ```
 Pod submitted → Watcher polls → Priority sort → Gang collect →
   → BinPack allocation → Annotate GPU UUIDs → Bind to node
-  → On failure: Preempt (checkpoint → evict → retry)
+  → On failure: Preempt (checkpoint → evict → auto-resume → retry)
 ```
 
 ## Testing
@@ -282,7 +295,7 @@ GPU-Scheduler addresses all of these with memory-level tracking, gang scheduling
 |--------|----------------------|---------|------------|-------------------|
 | GPU memory tracking | None | Basic | Deep | Per-MB tracking |
 | Gang scheduling | No | Yes (CRDs) | Yes | Yes (annotations) |
-| Preemption + checkpoint | No | No | Yes | Yes |
+| Preemption + auto-resume | No | No | Yes | Yes |
 | Shared GPU | No | No | Yes | Yes (webhook) |
 | MIG routing | No | No | Yes | Yes |
 | Complexity | Low | High | High | Low (annotations) |

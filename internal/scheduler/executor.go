@@ -18,6 +18,7 @@ import (
 type PodExecutor interface {
 	ExecInPod(ctx context.Context, namespace, podName, container string, cmd []string) error
 	DeletePod(ctx context.Context, namespace, podName string, gracePeriodSeconds int64) error
+	CreatePod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error)
 }
 
 type K8sExecutor struct {
@@ -81,4 +82,8 @@ func (e *K8sExecutor) DeletePod(ctx context.Context, namespace, podName string, 
 	return e.clientSet.CoreV1().Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{
 		GracePeriodSeconds: &gracePeriodSeconds,
 	})
+}
+
+func (e *K8sExecutor) CreatePod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	return e.clientSet.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 }

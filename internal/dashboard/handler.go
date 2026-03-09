@@ -90,6 +90,8 @@ func (h *Handler) PodsHandler(w http.ResponseWriter, r *http.Request) {
 					Preemptible:  scheduler.IsPreemptible(&pod, h.config.Workflows),
 					GangID:       scheduler.GetGangIDFromPod(&pod),
 					AssignedGPUs: scheduler.GetAssignedGPUS(&pod),
+					AutoResume:   scheduler.GetAutoResumeFromPod(&pod),
+					ResumeCmd:    scheduler.GetResumeCmdFromPod(&pod),
 				})
 				switch podPhase {
 				case v1.PodRunning:
@@ -143,6 +145,12 @@ func (h *Handler) PodsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if podRequest.CheckpointCmd != "" {
 			annotations["gpu-scheduler/checkpoint-cmd"] = podRequest.CheckpointCmd
+		}
+		if podRequest.AutoResume {
+			annotations["gpu-scheduler/auto-resume"] = "true"
+		}
+		if podRequest.ResumeCmd != "" {
+			annotations["gpu-scheduler/resume-cmd"] = podRequest.ResumeCmd
 		}
 
 		restartPolicy := v1.RestartPolicyNever
