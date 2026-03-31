@@ -1,12 +1,12 @@
 import { useSSE } from "@/hooks/useSSE";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPod, deletePod, fetchPodLogs, fetchPods, streamPodLogs } from "../hooks/useApi";
-import LogPanel from "./LogPanel";
 import type {
   CreatePodRequest,
   PodListResponse,
   PodResponse,
 } from "../types/api";
+import LogPanel from "./LogPanel";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
@@ -74,6 +74,8 @@ const defaultForm: CreatePodRequest = {
   check_point_cmd: "",
   restart_policy: "Never",
   memory_mode: "per-gpu",
+  auto_resume: false,
+  resume_cmd: ""
 };
 
 function SubmitPodForm({ onCreated }: { onCreated: () => void }) {
@@ -235,6 +237,16 @@ function SubmitPodForm({ onCreated }: { onCreated: () => void }) {
               />
               <Label htmlFor="preemptible">Preemptible</Label>
             </div>
+            <div className="flex items-center gap-2 pt-5">
+              <input
+                type="checkbox"
+                id="auto_resume"
+                checked={form.auto_resume}
+                onChange={(e) => update("auto_resume", e.target.checked)}
+                className="h-4 w-4 rounded border"
+              />
+              <Label htmlFor="auto_resume">Auto Resume</Label>
+            </div>
             <div className="space-y-1">
               <Label>Restart Policy</Label>
               <Select
@@ -272,7 +284,7 @@ function SubmitPodForm({ onCreated }: { onCreated: () => void }) {
           </div>
 
           {/* Row 5: Gang scheduling + Checkpoint */}
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-4 gap-4">
             <div className="space-y-1">
               <Label htmlFor="gang_id">Gang ID</Label>
               <Input
@@ -292,6 +304,15 @@ function SubmitPodForm({ onCreated }: { onCreated: () => void }) {
               />
             </div>
             <div className="space-y-1">
+              <Label htmlFor="resume_cmd">Resume Command</Label>
+              <Input
+                id="resume_cmd"
+                value={form.resume_cmd}
+                onChange={(e) => update("resume_cmd", e.target.value)}
+                placeholder="Optional"
+              />
+            </div>
+            <div className="space-y-1">
               <Label htmlFor="check_point_cmd">Checkpoint Command</Label>
               <Input
                 id="check_point_cmd"
@@ -302,6 +323,13 @@ function SubmitPodForm({ onCreated }: { onCreated: () => void }) {
             </div>
           </div>
 
+          {form.shared && (
+            <p className="text-sm text-yellow-500">
+              Sharing GPU requires MPS enabled on the target node (setup-mps.sh). Without MPS, pods 
+              have no memory isolation and can starve co-tenants. If the MPS daemon crashes, 
+              all shared pods on that GPU go down.
+            </p>
+          )}
           {error && <p className="text-sm text-destructive">{error}</p>}
 
           <Button type="submit" disabled={submitting}>
