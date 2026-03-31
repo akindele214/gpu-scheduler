@@ -69,6 +69,8 @@ export interface CreatePodRequest {
   check_point_cmd: string;
   restart_policy: string;
   memory_mode: MemoryMode;
+  auto_resume: boolean;
+  resume_cmd: string;
 }
 
 export interface CreatePodResponse {
