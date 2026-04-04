@@ -28,3 +28,4 @@ go.work.sum
 vast-key
 vast-key.pub
 .DS_Store
+.claude/
