@@ -20,6 +20,8 @@ import (
 	"github.com/akindele214/gpu-scheduler/internal/dashboard"
 	"github.com/akindele214/gpu-scheduler/internal/gpu"
 	"github.com/akindele214/gpu-scheduler/internal/scheduler"
+	"github.com/akindele214/gpu-scheduler/pkg/controlplane"
+	"github.com/akindele214/gpu-scheduler/pkg/types"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -168,6 +170,7 @@ func NewScheduler() (*Scheduler, error) {
 		)
 		log.Println("Running in STANDALONE mode")
 		mux := http.NewServeMux()
+		s.registerInferenceWorkerEndpoints(mux)
 		s.registerGPUReportEndpoint(mux)
 		mux.Handle("/", gpuscheduler.DashboardHandler())
 		mux.Handle("/metrics", promhttp.Handler())
@@ -340,6 +343,59 @@ func (s *Scheduler) registerGPUReportEndpoint(mux *http.ServeMux) {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 }
+
+func (s *Scheduler) registerInferenceWorkerEndpoints(mux *http.ServeMux) {
+	mux.HandleFunc("/api/v1/control/workers", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		allPods, err := s.watcher.GetRunningPod()
+		if err != nil {
+			log.Printf("error fetching running pod %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		var workerInfo []controlplane.WorkerInfo
+		for _, pod := range allPods {
+			podRole := scheduler.GetPodInferenceRole(pod)
+			endpoint := scheduler.GetInferencePodEndpoint(pod)
+			modelGroup := scheduler.GetPodModelGroup(pod)
+			node := s.registry.GetNode(pod.Spec.NodeName)
+			if node == nil {
+				log.Printf("node not found in registry %s", pod.Spec.NodeName)
+				continue
+			}
+			if podRole == types.Unknown {
+				continue
+			}
+			routable := endpoint != ""
+			switch podRole {
+			case types.Prefill, types.Decode:
+				routable = routable && modelGroup != ""
+			case types.Unified:
+				// endpoint-only is enough 4 unified
+			default:
+				routable = false
+			}
+			workerInfo = append(workerInfo, controlplane.WorkerInfo{
+				ID:           fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
+				Role:         podRole,
+				State:        controlplane.Ready,
+				Routable:     routable,
+				GPU2GPUReady: node.HasNVLink,
+				Endpoint:     endpoint,
+				ModelGroup:   modelGroup,
+			},
+			)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(workerInfo)
+	})
+}
+
 func buildKubeClient() (kubernetes.Interface, *rest.Config, error) {
 	// Try in-cluster config first (when running in K8s)
 	cfg, err := rest.InClusterConfig()

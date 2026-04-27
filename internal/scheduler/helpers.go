@@ -208,3 +208,88 @@ func GetOriginalPriorityFromPod(pod *corev1.Pod) int {
 	}
 	return -1
 }
+
+func GetPodInferenceRole(pod *corev1.Pod) types.InferenceRole {
+	value, exists := pod.Annotations["gpu-scheduler/inference-role"]
+
+	if exists {
+		role := types.InferenceRole(value)
+		switch role {
+		case types.Prefill, types.Decode, types.Unified:
+			return role
+		default:
+			return types.Unknown
+		}
+	}
+	return types.Unknown
+}
+
+func GetPodModelGroup(pod *corev1.Pod) string {
+	value := strings.TrimSpace(pod.Annotations["gpu-scheduler/model-group"])
+	if value == "" {
+		return ""
+	}
+	return value
+}
+
+func GetInferencePodEndpoint(pod *corev1.Pod) string {
+	value := strings.TrimSpace(pod.Annotations["gpu-scheduler/inference-endpoint"])
+	if value == "" {
+		return ""
+	}
+	return value
+}
+
+func GetDisaggPodIntent(pod *corev1.Pod) *types.DisaggPodIntent {
+	modelGroup := GetPodModelGroup(pod)
+	role := GetPodInferenceRole(pod)
+	intent := &types.DisaggPodIntent{
+		ModelGroup: modelGroup,
+		Role:       role,
+		IsDisagg:   role == types.Prefill || role == types.Decode,
+		IsValid:    true,
+		Reason:     "",
+	}
+	switch role {
+	case types.Prefill:
+		if modelGroup == "" {
+			intent.IsValid = false
+			intent.Reason = "missing model-group for prefill role"
+		}
+		if IsSharedGPUPod(pod) {
+			intent.IsValid = false
+			intent.Reason = "shared GPU is not allowed for disaggregated inference roles (prefill/decode); set gpu-scheduler/shared=false"
+		}
+	case types.Decode:
+		if modelGroup == "" {
+			intent.IsValid = false
+			intent.Reason = "missing model-group for decode role"
+		}
+		if IsSharedGPUPod(pod) {
+			intent.IsValid = false
+			intent.Reason = "shared GPU is not allowed for disaggregated inference roles (prefill/decode); set gpu-scheduler/shared=false"
+		}
+	case types.Unified:
+		// Valid by default.
+	case types.Unknown:
+		intent.IsDisagg = false
+		if modelGroup != "" {
+			intent.IsValid = false
+			intent.Reason = "model-group set but inference-role is unknown"
+		}
+	default:
+		intent.IsValid = false
+		intent.IsDisagg = false
+		intent.Reason = "invalid inference-role"
+	}
+	return intent
+}
+
+func IsInferencePod(pod *corev1.Pod) bool {
+	podRole := GetPodInferenceRole(pod)
+
+	if podRole == types.Unified || types.Prefill == podRole || types.Decode == podRole {
+		return true
+	}
+	return false
+}

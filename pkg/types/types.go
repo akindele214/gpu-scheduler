@@ -10,6 +10,7 @@ type JobStatus string
 type JobPriority string
 type WorkflowType string
 type MemoryMode string
+type InferenceRole string
 
 const (
 	MemoryPerGPU MemoryMode = "per-gpu" // Each GPU needs exactly this much
@@ -22,6 +23,11 @@ const (
 	Build     WorkflowType = "build"
 	Training  WorkflowType = "training"
 	Inference WorkflowType = "inference"
+
+	Prefill InferenceRole = "prefill"
+	Decode  InferenceRole = "decode"
+	Unified InferenceRole = "unified"
+	Unknown InferenceRole = "unknown"
 
 	// JobStatus
 	Pending   JobStatus = "pending"
@@ -84,6 +90,7 @@ type NodeInfo struct {
 	Name          string
 	Labels        map[string]string // e.g., "gpu-type": "H100"
 	GPUs          []GPU
+	HasNVLink     bool
 	TotalGPUs     int
 	AvailableGPUs int      // healthy + has capacity
 	Conditions    []string // e.g., "Ready", "MemoryPressure"
@@ -97,4 +104,12 @@ type SchedulingResult struct {
 	Reason    string
 	Timestamp time.Time
 	IsMIG     bool
+}
+
+type DisaggPodIntent struct {
+	Role       InferenceRole
+	ModelGroup string
+	IsDisagg   bool
+	IsValid    bool
+	Reason     string
 }

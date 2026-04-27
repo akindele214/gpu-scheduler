@@ -35,6 +35,11 @@ workflows:
   batch:
     priority: 50
     scheduling: "binpack"
+  
+proxy:
+  enabled: true
+  port: 8080
+  scheduler_url: "http://localhost:8888"
 # scheduler:
 #   name: "gpu-scheduler"
 #   port: 8888

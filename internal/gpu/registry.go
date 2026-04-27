@@ -34,6 +34,7 @@ type PodAllocation struct {
 
 type NodeGPUs struct {
 	NodeName   string          `json:"node_name"`
+	HasNVLink  bool            `json:"has_nvlink"`
 	GPUs       []agent.GPUInfo `json:"gpus"`
 	ReportedAt time.Time       `json:"reported_at"`
 }
@@ -55,6 +56,7 @@ func (r *Registry) UpdateFromReport(report *agent.GPUReport) {
 	reportTime := time.Now()
 	r.lastSeen[report.NodeName] = reportTime
 	r.nodes[report.NodeName] = &NodeGPUs{
+		HasNVLink:  report.HasNVLink,
 		NodeName:   report.NodeName,
 		ReportedAt: reportTime,
 		GPUs:       report.GPUs,

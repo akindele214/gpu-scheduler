@@ -6,6 +6,7 @@ import (
 
 type GPUReport struct {
 	NodeName  string    `json:"node_name"`
+	HasNVLink bool      `json:"has_nvlink"`
 	Timestamp time.Time `json:"timestamp"`
 	GPUs      []GPUInfo `json:"gpus"`
 }

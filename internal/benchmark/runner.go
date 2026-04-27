@@ -16,6 +16,7 @@ import (
 
 type RunnerConfig struct {
 	BaseURL     string
+	MetricsURL  string
 	Model       string
 	MaxTokens   int
 	NumRequests int
@@ -36,7 +37,7 @@ type Runner struct {
 
 func NewRunner(cfg RunnerConfig) *Runner {
 	return &Runner{
-		Client: *http.DefaultClient,
+		Client: http.Client{Timeout: 120 * time.Second},
 		Config: cfg,
 	}
 }
@@ -59,7 +60,9 @@ func (r *Runner) sendRequest(requestID int) *RequestMetrics {
 	body, err := json.Marshal(completionReq)
 
 	if err != nil {
-		return &RequestMetrics{}
+		return &RequestMetrics{
+			Error: err,
+		}
 	}
 	requestStart := time.Now()
 	resp, err := r.Client.Post(url, "application/json", bytes.NewReader(body))
@@ -116,7 +119,7 @@ func (r *Runner) sendRequest(requestID int) *RequestMetrics {
 }
 
 func (r *Runner) scrapeMetrics() *ServerMetrics {
-	url := r.Config.BaseURL + "/metrics"
+	url := r.Config.MetricsURL + "/metrics"
 	resp, err := r.Client.Get(url)
 	if err != nil {
 		return &ServerMetrics{}
@@ -167,7 +170,11 @@ func (r *Runner) Run(concurrency int) BenchMarkResult {
 			defer func() { <-sem }() // Release: free the slot
 			workerRes := r.sendRequest(i)
 			ops.Add(1)
-			fmt.Printf("[%d/%d] Completed\n", int(ops.Load()), r.Config.NumRequests)
+			if workerRes.Error != nil {
+				fmt.Printf("[%d/%d] Completed (Error: %s)\n", int(ops.Load()), r.Config.NumRequests, workerRes.Error.Error())
+			} else {
+				fmt.Printf("[%d/%d] Completed\n", int(ops.Load()), r.Config.NumRequests)
+			}
 			results <- *workerRes
 		})
 	}
