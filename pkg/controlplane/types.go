@@ -26,6 +26,14 @@ type WorkerInfo struct {
 	ModelGroup   string              `json:"model_group"`
 }
 
+type WorkerStat struct {
+	ID           string  `json:"id"`
+	Inflight     int     `json:"inflight"`
+	QueueWaitP95 float64 `json:"queue_wait_p95"`
+	TTFTP95      float64 `json:"ttft_p95"`
+	ITLP95       float64 `json:"itl_p95"`
+}
+
 type PressureState string
 type WorkerState string
 

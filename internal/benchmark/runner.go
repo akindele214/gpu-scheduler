@@ -29,7 +29,16 @@ type completionRequest struct {
 	MaxTokens int    `json:"max_tokens"`
 	Stream    bool   `json:"stream"`
 }
+type ChatCompletionRequest struct {
+	Model    string        `json:"model"`
+	Messages []ChatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+}
 
+type ChatMessage struct {
+	Role    string `json:"role"`    // "system" | "user" | "assistant"
+	Content string `json:"content"` // text-only V1
+}
 type Runner struct {
 	Client http.Client
 	Config RunnerConfig
@@ -48,15 +57,21 @@ func (r *Runner) sendRequest(requestID int) *RequestMetrics {
 	var lastTokenTime time.Time
 
 	tokenCount := 0
-	url := r.Config.BaseURL + "/v1/completions"
+	url := r.Config.BaseURL + "/v1/chat/completions"
 	prompt := fmt.Sprintf("%s (Request #%d)", r.Config.Prompts[requestID], requestID)
-
-	completionReq := completionRequest{
-		Model:     r.Config.Model,
-		Prompt:    prompt,
-		MaxTokens: r.Config.MaxTokens,
-		Stream:    true,
+	completionReq := ChatCompletionRequest{
+		Model:  r.Config.Model,
+		Stream: true,
+		Messages: []ChatMessage{
+			{Role: "user", Content: prompt},
+		},
 	}
+	// completionReq := completionRequest{
+	// 	Model:     r.Config.Model,
+	// 	Prompt:    prompt,
+	// 	MaxTokens: r.Config.MaxTokens,
+	// 	Stream:    true,
+	// }
 	body, err := json.Marshal(completionReq)
 
 	if err != nil {

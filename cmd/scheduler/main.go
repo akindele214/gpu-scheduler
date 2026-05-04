@@ -332,10 +332,11 @@ func (s *Scheduler) registerGPUReportEndpoint(mux *http.ServeMux) {
 				mpsCount++
 			}
 		}
-		log.Printf("[REPORT] Node %s: %d GPU(s), actual=%d MB, reserved=%d MB, total=%d MB (%.1f%% actual, %.1f%% reserved), MIG=%v, MPS=%d/%d",
+		log.Printf("[REPORT] Node %s: %d GPU(s), actual=%d MB, reserved=%d MB, total=%d MB (%.1f%% actual, %.1f%% reserved), NVLink=%v, MIG=%v, MPS=%d/%d",
 			report.NodeName, len(report.GPUs), usedMem, reservedMem, totalMem,
 			float64(usedMem)/float64(totalMem)*100,
 			float64(reservedMem)/float64(totalMem)*100,
+			report.HasNVLink,
 			len(report.GPUs) > 0 && report.GPUs[0].MIGEnabled,
 			mpsCount, len(report.GPUs))
 

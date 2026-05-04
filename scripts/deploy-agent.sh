@@ -7,6 +7,7 @@ SSH_KEY="vast-key"
 SSH_USER="root"
 REMOTE_DIR="/root/gpu-agent"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+FORCE_NVLINK="${FORCE_NVLINK:-}"
 
 # Server details (for SSH tunnel from workers)
 SERVER="23.135.236.7:7454"
@@ -76,9 +77,15 @@ for entry in "${NODES[@]}"; do
     echo "SSH tunnel established"
   fi
 
+  NVLINK_OVERRIDE_ENV=""
+  if [ -n "${FORCE_NVLINK}" ]; then
+    NVLINK_OVERRIDE_ENV="GPU_SCHEDULER_AGENT_HAS_NVLINK_OVERRIDE=${FORCE_NVLINK}"
+  fi
+
   # Start agent — all nodes use localhost:8888
   ${SSH_CMD} \
-    "nohup ${REMOTE_DIR}/gpu-agent \
+    "${NVLINK_OVERRIDE_ENV} \
+      nohup ${REMOTE_DIR}/gpu-agent \
       --node-name=${NODE_NAME} \
       --scheduler-url=http://localhost:8888 \
       --interval=5s \

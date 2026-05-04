@@ -3,12 +3,13 @@ package config
 import "fmt"
 
 type Config struct {
-	Scheduler  SchedulerConfig  `mapstructure:"scheduler" json:"scheduler"`
-	Queue      QueueConfig      `mapstructure:"queue" json:"queue"`
-	Workflows  WorkflowConfig   `mapstructure:"workflows" json:"workflows"`
-	GPU        GPUConfig        `mapstructure:"gpu" json:"gpu"`
-	Kubernetes KubernetesConfig `mapstructure:"kubernetes" json:"kubernetes"`
-	Logging    LoggingConfig    `mapstructure:"logging" json:"logging"`
+	Scheduler   SchedulerConfig  `mapstructure:"scheduler" json:"scheduler"`
+	Queue       QueueConfig      `mapstructure:"queue" json:"queue"`
+	Workflows   WorkflowConfig   `mapstructure:"workflows" json:"workflows"`
+	GPU         GPUConfig        `mapstructure:"gpu" json:"gpu"`
+	Kubernetes  KubernetesConfig `mapstructure:"kubernetes" json:"kubernetes"`
+	Logging     LoggingConfig    `mapstructure:"logging" json:"logging"`
+	ProxyConfig ProxyConfig      `mapstructure:"proxy" json:"proxy"`
 }
 
 type SchedulerConfig struct {
@@ -57,6 +58,12 @@ type LoggingConfig struct {
 	Format string `mapstructure:"format" json:"format"`
 }
 
+type ProxyConfig struct {
+	Enabled      bool   `mapstructure:"enabled" json:"enabled"`
+	Port         int    `mapstructure:"port" json:"port"`
+	SchedulerURL string `mapstructure:"scheduler_url" json:"scheduler_url"`
+}
+
 func (config *Config) Validate() error {
 	if config.Scheduler.Name == "" {
 		return fmt.Errorf("scheduler.name is required")
@@ -80,7 +87,7 @@ func (config *Config) Validate() error {
 			}
 		}
 	}
-	if config.Scheduler.MetricsPort < 1 || config.Scheduler.MetricsPort > 655535 {
+	if config.Scheduler.Port < 1 || config.Scheduler.Port > 655535 {
 		return fmt.Errorf("scheduler.port should be between 1-65535")
 	}
 	if config.Scheduler.MetricsPort < 1 || config.Scheduler.MetricsPort > 655535 {
@@ -103,6 +110,15 @@ func (config *Config) Validate() error {
 	validFormats := map[string]bool{"json": true, "text": true}
 	if !validFormats[config.Logging.Format] {
 		return fmt.Errorf("logging.format must be 'json' or 'text'")
+	}
+
+	if config.ProxyConfig.Enabled {
+		if config.ProxyConfig.SchedulerURL == "" {
+			return fmt.Errorf("proxy.scheduler_url cannot be empty")
+		}
+		if config.ProxyConfig.Port < 1 || config.ProxyConfig.Port > 655535 {
+			return fmt.Errorf("proxy.port should be between 1-65535")
+		}
 	}
 	return nil
 }

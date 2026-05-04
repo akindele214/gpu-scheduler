@@ -1,12 +1,12 @@
 # Install vLLM and huggingface
-> pip install vllm huggingface_hub lmcache msgpack
+> pip install vllm huggingface_hub lmcache msgpack quart
 # Login to hugging face
 > huggingface-cli login
 # install go
 > wget https://go.dev/dl/go1.23.0.linux-amd64.tar.gz && sudo tar -C /usr/local -xzf go1.23.0.linux-amd64.tar.gz && export PATH=$PATH:/usr/local/go/bin
 # serve model
 > vllm serve Qwen2.5-3B-Instruct 
-> go build -o benchmark ./cmd/benchmark && ./benchmark --url http://localhost:8000 --model meta-llama/Llama-3.1-8B --requests 200 --max-tokens 200
+> go build -o benchmark ./cmd/benchmark && ./benchmark --url http://localhost:8000 --model Qwen/Qwen2.5-32B-Instruct --requests 200 --max-tokens 200
 > wget https://raw.githubusercontent.com/vllm-project/vllm/main/benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py
 pip install quart
 python3 disagg_prefill_proxy_server.py \
@@ -105,3 +105,6 @@ Once both are up, run the full test with counters:
 echo "=== BEFORE ===" && nvidia-smi nvlink -gt d | grep "Link 0" && echo "=== PREFILL ===" && PREFILL_RESP=$(curl -s http://localhost:20001/v1/completions -H "Content-Type: application/json" -d "{\"model\":\"Qwen/Qwen2.5-14B-Instruct\",\"prompt\":\"$(python3 -c "print('Explain in detail: ' + ' '.join(['The history of computing includes many fascinating developments.']*50))")\",\"max_tokens\":1,\"kv_transfer_params\":{\"do_remote_decode\":true}}") && echo "$PREFILL_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Prompt tokens:', d['usage']['prompt_tokens']); print('Blocks:', d['kv_transfer_params']['remote_block_ids'])" && KV_PARAMS=$(echo "$PREFILL_RESP" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['kv_transfer_params']))") && echo "=== DECODE ===" && curl -s http://localhost:20002/v1/completions -H "Content-Type: application/json" -d "{\"model\":\"Qwen/Qwen2.5-14B-Instruct\",\"prompt\":\"$(python3 -c "print('Explain in detail: ' + ' '.join(['The history of computing includes many fascinating developments.']*50))")\",\"max_tokens\":32,\"kv_transfer_params\":$KV_PARAMS}" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Generated:', d['choices'][0]['text'])" && echo "=== AFTER ===" && nvidia-smi nvlink -gt d | grep "Link 0"
 14B has 48 layers with larger hidden dims — expect significantly more KV data over NVLink than the 3B model.
 
+
+pkill -f "./proxy" || true \
+GPU_SCHEDULER_PROXY_SCHEDULER_URL=http://localhost:8888 GPU_SCHEDULER_PROXY_PORT=8080 ./proxy
