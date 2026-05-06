@@ -16,6 +16,7 @@ set -euo pipefail
 #   SCHEDULER_URL=http://localhost:8888
 #   PROXY_URL=http://localhost:8080
 #   MODEL_GROUP=Qwen/Qwen2.5-14B-Instruct
+#   HF_TOKEN=hf_...  # optional, creates/updates Kubernetes secret hf-token
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -36,8 +37,22 @@ require_cmd() {
   }
 }
 
+ensure_hf_token_secret() {
+  if [[ -z "${HF_TOKEN:-}" ]]; then
+    echo "HF_TOKEN not set; continuing without Hugging Face auth secret"
+    return
+  fi
+
+  echo "Creating/updating Hugging Face token secret in namespace ${NAMESPACE}"
+  kubectl -n "${NAMESPACE}" create secret generic hf-token \
+    --from-literal=HF_TOKEN="${HF_TOKEN}" \
+    --dry-run=client \
+    -o yaml | kubectl apply -f -
+}
+
 do_apply() {
   require_cmd kubectl
+  ensure_hf_token_secret
   echo "Applying ${MANIFEST}"
   kubectl apply -f "${MANIFEST}"
   echo "Waiting for pod/${POD_NAME} to become Ready..."

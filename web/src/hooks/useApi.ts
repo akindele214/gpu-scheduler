@@ -3,11 +3,14 @@ import type {
   ConfigResponse,
   CreatePodRequest,
   CreatePodResponse,
+  InferenceWorker,
   LogEntry,
   LogResponse,
   PodListResponse,
+  PressureReport,
   SSEEvent,
   SSEEventType,
+  WorkerStat,
 } from '../types/api';
 
 const API_BASE = '/api/v1/dashboard';
@@ -128,4 +131,25 @@ export function subscribeLogEvents(onLog: (entry: LogEntry) => void): EventSourc
     onLog(JSON.parse((e as MessageEvent).data));
   });
   return es;
+}
+
+export async function fetchInferenceWorkers(): Promise<InferenceWorker[]> {
+  const res = await fetch(`${API_BASE}/inference/workers`);
+  if (!res.ok) throw new Error(`Failed to fetch inference workers: ${res.statusText}`);
+  const workers = await res.json();
+  return workers ?? [];
+}
+
+export async function fetchProxyWorkerStats(): Promise<WorkerStat[]> {
+  const res = await fetch(`${API_BASE}/proxy/worker-stats`);
+  if (!res.ok) throw new Error(`Failed to fetch proxy worker stats: ${res.statusText}`);
+  const stats = await res.json();
+  return stats ?? [];
+}
+
+export async function fetchProxyPressure(): Promise<PressureReport[]> {
+  const res = await fetch(`${API_BASE}/proxy/pressure`);
+  if (!res.ok) throw new Error(`Failed to fetch proxy pressure: ${res.statusText}`);
+  const pressure = await res.json();
+  return pressure ?? [];
 }

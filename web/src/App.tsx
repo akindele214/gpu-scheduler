@@ -2,6 +2,7 @@ import ClusterOverview from "./components/ClusterOverview";
 import PodsSection from "./components/PodsSection";
 import ConfigSection from "./components/ConfigSection";
 import LogViewer from "./components/LogViewer";
+import InferenceSection from "./components/InferenceSection";
 
 function App() {
   return (
@@ -11,6 +12,7 @@ function App() {
       </header>
       <main className="mx-auto max-w-screen-xl space-y-8 p-6">
         <ClusterOverview />
+        <InferenceSection />
         <PodsSection />
         <ConfigSection />
         <LogViewer />

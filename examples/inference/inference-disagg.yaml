@@ -68,6 +68,18 @@ spec:
           value: "0"
         - name: VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER
           value: "0"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
         - name: VLLM_NIXL_SIDE_CHANNEL_HOST
           valueFrom:
             fieldRef:
@@ -97,6 +109,20 @@ spec:
           name: http
         - containerPort: 5600
           name: nixl
+      startupProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 120
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
       resources:
         limits:
           nvidia.com/gpu: "1"
@@ -135,6 +161,18 @@ spec:
           value: "0"
         - name: VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER
           value: "0"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
         - name: VLLM_NIXL_SIDE_CHANNEL_HOST
           valueFrom:
             fieldRef:
@@ -164,6 +202,20 @@ spec:
           name: http
         - containerPort: 5601
           name: nixl
+      startupProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 120
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
       resources:
         limits:
           nvidia.com/gpu: "1"

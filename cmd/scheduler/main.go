@@ -346,7 +346,7 @@ func (s *Scheduler) registerGPUReportEndpoint(mux *http.ServeMux) {
 }
 
 func (s *Scheduler) registerInferenceWorkerEndpoints(mux *http.ServeMux) {
-	mux.HandleFunc("/api/v1/control/workers", func(w http.ResponseWriter, r *http.Request) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -394,7 +394,9 @@ func (s *Scheduler) registerInferenceWorkerEndpoints(mux *http.ServeMux) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(workerInfo)
-	})
+	}
+	mux.HandleFunc("/api/v1/control/workers", handler)
+	mux.HandleFunc("/api/v1/dashboard/inference/workers", handler)
 }
 
 func buildKubeClient() (kubernetes.Interface, *rest.Config, error) {
