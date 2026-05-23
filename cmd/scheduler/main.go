@@ -8,8 +8,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,6 +25,8 @@ import (
 	"github.com/akindele214/gpu-scheduler/pkg/controlplane"
 	"github.com/akindele214/gpu-scheduler/pkg/types"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -51,17 +55,20 @@ func main() {
 }
 
 type Scheduler struct {
-	config        *config.Config
-	manager       *gpu.Manager
-	allocator     *allocator.Allocator
-	extender      *scheduler.Extender
-	registry      *gpu.Registry
-	watcher       *scheduler.Watcher
-	server        *http.Server
-	webhookServer *http.Server
-	eventBus      *dashboard.EventBus
-	dashHandler   *dashboard.Handler
-	stopCh        chan struct{}
+	config                 *config.Config
+	manager                *gpu.Manager
+	allocator              *allocator.Allocator
+	extender               *scheduler.Extender
+	rebalancer             *scheduler.Rebalancer
+	kubeClient             kubernetes.Interface
+	registry               *gpu.Registry
+	watcher                *scheduler.Watcher
+	server                 *http.Server
+	webhookServer          *http.Server
+	eventBus               *dashboard.EventBus
+	dashHandler            *dashboard.Handler
+	executeRebalanceAction func(scheduler.ModelGroupPolicy, scheduler.RebalancerDecisionResult) error
+	stopCh                 chan struct{}
 }
 
 func NewScheduler() (*Scheduler, error) {
@@ -112,12 +119,15 @@ func NewScheduler() (*Scheduler, error) {
 	registry := gpu.NewRegistry()
 	alloc := allocator.NewAllocator(manager, registry)
 	s := &Scheduler{
-		config:    cfg,
-		manager:   manager,
-		allocator: alloc,
-		registry:  registry,
-		stopCh:    make(chan struct{}),
+		config:     cfg,
+		manager:    manager,
+		allocator:  alloc,
+		rebalancer: scheduler.NewRebalancer(cfg),
+		kubeClient: kubeClient,
+		registry:   registry,
+		stopCh:     make(chan struct{}),
 	}
+	s.executeRebalanceAction = s.handleRebalancerAction
 	// 6. Create Extender or Watcher based on mode
 	if cfg.Scheduler.Mode == "standalone" {
 		clientset, ok := kubeClient.(*kubernetes.Clientset)
@@ -240,6 +250,7 @@ func (s *Scheduler) Run() error {
 			log.Println("No certs/tls.crt found, webhook server disabled")
 		}
 		go s.gpuReportBroadcastLoop()
+		go s.rebalancingLoop()
 		s.watcher.Run() // This blocks
 		return nil
 	}
@@ -304,6 +315,254 @@ func (s *Scheduler) gpuReportBroadcastLoop() {
 	}
 }
 
+func (s *Scheduler) rebalancingLoop() {
+	if s.rebalancer == nil || !s.rebalancer.Enabled {
+		log.Println("[rebalancer] disabled")
+		return
+	}
+
+	interval := time.Duration(s.rebalancer.TickIntervalSeconds) * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	log.Printf("[rebalancer] starting dry_run=%v interval=%s model_groups=%d", s.rebalancer.DryRun, interval, len(s.rebalancer.ModelGroupPolicies))
+
+	for {
+		select {
+		case <-ticker.C:
+			s.runRebalancingTick()
+		case <-s.stopCh:
+			log.Println("[rebalancer] stopping")
+			return
+		}
+	}
+}
+
+func (s *Scheduler) runRebalancingTick() {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	pressureReports, err := s.fetchProxyPressureReports(ctx)
+	if err != nil {
+		log.Printf("[rebalancer] pressure fetch failed: %v", err)
+		return
+	}
+
+	workers, err := s.collectInferenceWorkers()
+	if err != nil {
+		log.Printf("[rebalancer] worker fetch failed: %v", err)
+		return
+	}
+
+	s.processRebalancingReports(pressureReports, workers, time.Now())
+}
+
+func (s *Scheduler) processRebalancingReports(pressureReports []controlplane.PressureReport, workers []controlplane.WorkerInfo, now time.Time) {
+	pressureByModelGroup := map[string]controlplane.PressureReport{}
+	for _, report := range pressureReports {
+		pressureByModelGroup[report.ModelGroup] = report
+	}
+
+	for _, policy := range s.rebalancer.ModelGroupPolicies {
+		report, ok := pressureByModelGroup[policy.Name]
+		if !ok {
+			log.Printf("[rebalancer] model_group=%q action=%s reason=no_pressure_report dry_run=%v", policy.Name, scheduler.None, s.rebalancer.DryRun)
+			continue
+		}
+
+		modelWorkers := make([]*controlplane.WorkerInfo, 0)
+		for i := range workers {
+			if workers[i].ModelGroup == policy.Name {
+				modelWorkers = append(modelWorkers, &workers[i])
+			}
+		}
+
+		decision := s.rebalancer.Evaluate(policy, report, modelWorkers, now)
+		log.Printf("[rebalancer] model_group=%q pressure=%s ttft_p95=%.2f itl_p95=%.2f workers=%d action=%s reason=%s dry_run=%v",
+			policy.Name,
+			report.PressureState,
+			report.TTFTP95,
+			report.ITLP95,
+			len(modelWorkers),
+			decision.Action,
+			decision.Reason,
+			decision.DryRun,
+		)
+		if decision.Action == scheduler.None {
+			continue
+		}
+		if decision.DryRun {
+			log.Printf("[rebalancer] model_group=%q action=%s execution_skipped=true reason=dry_run", policy.Name, decision.Action)
+			continue
+		}
+		blocked, err := s.checkDeduplication(policy, decision, modelWorkers)
+		if err != nil {
+			log.Printf("[rebalancer] model_group=%q action=%s dedupe_error=%v blocked=true", policy.Name, decision.Action, err)
+			continue
+		}
+		if blocked {
+			log.Printf("[rebalancer] model_group=%q action=%s blocked=true reason=deduplication", policy.Name, decision.Action)
+			continue
+		}
+		if s.executeRebalanceAction == nil {
+			log.Printf("[rebalancer] model_group=%q action=%s execution_error=%v", policy.Name, decision.Action, "rebalance executor is not configured")
+			continue
+		}
+		err = s.executeRebalanceAction(policy, decision)
+		if err != nil {
+			log.Printf("[rebalancer] model_group=%q action=%s execution_error=%v", policy.Name, decision.Action, err)
+		} else {
+			log.Printf("[rebalancer] model_group=%q action=%s executed=true", policy.Name, decision.Action)
+		}
+	}
+}
+
+func (s *Scheduler) checkDeduplication(policy scheduler.ModelGroupPolicy, decision scheduler.RebalancerDecisionResult, modelWorkers []*controlplane.WorkerInfo) (bool, error) {
+	var prefillWorkers, decodeWorkers []*controlplane.WorkerInfo
+	for _, worker := range modelWorkers {
+		switch worker.Role {
+		case types.Prefill:
+			prefillWorkers = append(prefillWorkers, worker)
+		case types.Decode:
+			decodeWorkers = append(decodeWorkers, worker)
+		}
+	}
+
+	switch decision.Action {
+	case scheduler.AddDecode:
+		if len(decodeWorkers) >= policy.MaxDecodeWorkers {
+			return true, nil
+		}
+		return s.hasInProgressInferencePod(policy, types.Decode)
+	case scheduler.AddPrefill:
+		if len(prefillWorkers) >= policy.MaxPrefillWorkers {
+			return true, nil
+		}
+		return s.hasInProgressInferencePod(policy, types.Prefill)
+	case scheduler.ScaleBoth:
+		return true, nil
+	case scheduler.RemoveDecode:
+		return true, nil
+	case scheduler.RemovePrefill:
+		return true, nil
+	default:
+		return true, nil
+	}
+}
+
+func (s *Scheduler) hasInProgressInferencePod(policy scheduler.ModelGroupPolicy, targetRole types.InferenceRole) (bool, error) {
+	if s.kubeClient == nil {
+		return false, fmt.Errorf("kubernetes client is not configured")
+	}
+
+	namespace := s.config.Kubernetes.Namespace
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	pods, err := s.kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+
+	for _, pod := range pods.Items {
+		if pod.Annotations["gpu-scheduler/workflow"] != string(types.Inference) {
+			continue
+		}
+		if scheduler.GetPodModelGroup(&pod) != policy.Name {
+			continue
+		}
+		if scheduler.GetPodInferenceRole(&pod) != targetRole {
+			continue
+		}
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if isPodReady(&pod) {
+			continue
+		}
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func isPodReady(pod *corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Scheduler) handleRebalancerAction(policy scheduler.ModelGroupPolicy, decision scheduler.RebalancerDecisionResult) error {
+	var scriptAction string
+	switch decision.Action {
+	case scheduler.AddDecode:
+		scriptAction = "scale-decode-up"
+	case scheduler.AddPrefill:
+		scriptAction = "scale-prefill-up"
+	default:
+		return fmt.Errorf("unsupported rebalancer action %q", decision.Action)
+	}
+
+	scriptPath := strings.TrimSpace(policy.ExecutionScript)
+	if scriptPath == "" {
+		return fmt.Errorf("no execution script configured for model group %q", policy.Name)
+	}
+	if _, err := os.Stat(scriptPath); err != nil {
+		return fmt.Errorf("rebalance script %q is not available: %w", scriptPath, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, scriptPath, scriptAction)
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("NAMESPACE=%s", s.config.Kubernetes.Namespace),
+		fmt.Sprintf("SCHEDULER_URL=http://localhost:%d", s.config.Scheduler.Port),
+		fmt.Sprintf("PROXY_URL=http://localhost:%d", s.config.ProxyConfig.Port),
+		fmt.Sprintf("MODEL_GROUP=%s", policy.Name),
+	)
+
+	log.Printf("[rebalancer] model_group=%q action=%s script=%q script_action=%q", policy.Name, decision.Action, scriptPath, scriptAction)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("rebalance script timed out: %s", string(output))
+	}
+	if err != nil {
+		return fmt.Errorf("rebalance script failed: %w output=%s", err, string(output))
+	}
+	if len(output) > 0 {
+		log.Printf("[rebalancer] model_group=%q action=%s script_output=%s", policy.Name, decision.Action, string(output))
+	}
+	return nil
+}
+
+func (s *Scheduler) fetchProxyPressureReports(ctx context.Context) ([]controlplane.PressureReport, error) {
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/control/pressure", s.config.ProxyConfig.Port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("proxy pressure endpoint returned status %d", resp.StatusCode)
+	}
+
+	var reports []controlplane.PressureReport
+	if err := json.NewDecoder(resp.Body).Decode(&reports); err != nil {
+		return nil, err
+	}
+	return reports, nil
+}
+
 func (s *Scheduler) registerGPUReportEndpoint(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/gpu-report", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -351,45 +610,12 @@ func (s *Scheduler) registerInferenceWorkerEndpoints(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		allPods, err := s.watcher.GetRunningPod()
+
+		workerInfo, err := s.collectInferenceWorkers()
 		if err != nil {
-			log.Printf("error fetching running pod %v", err)
+			log.Printf("error fetching inference workers %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
-		}
-
-		var workerInfo []controlplane.WorkerInfo
-		for _, pod := range allPods {
-			podRole := scheduler.GetPodInferenceRole(pod)
-			endpoint := scheduler.GetInferencePodEndpoint(pod)
-			modelGroup := scheduler.GetPodModelGroup(pod)
-			node := s.registry.GetNode(pod.Spec.NodeName)
-			if node == nil {
-				log.Printf("node not found in registry %s", pod.Spec.NodeName)
-				continue
-			}
-			if podRole == types.Unknown {
-				continue
-			}
-			routable := endpoint != ""
-			switch podRole {
-			case types.Prefill, types.Decode:
-				routable = routable && modelGroup != ""
-			case types.Unified:
-				// endpoint-only is enough 4 unified
-			default:
-				routable = false
-			}
-			workerInfo = append(workerInfo, controlplane.WorkerInfo{
-				ID:           fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
-				Role:         podRole,
-				State:        controlplane.Ready,
-				Routable:     routable,
-				GPU2GPUReady: node.HasNVLink,
-				Endpoint:     endpoint,
-				ModelGroup:   modelGroup,
-			},
-			)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -397,6 +623,47 @@ func (s *Scheduler) registerInferenceWorkerEndpoints(mux *http.ServeMux) {
 	}
 	mux.HandleFunc("/api/v1/control/workers", handler)
 	mux.HandleFunc("/api/v1/dashboard/inference/workers", handler)
+}
+
+func (s *Scheduler) collectInferenceWorkers() ([]controlplane.WorkerInfo, error) {
+	allPods, err := s.watcher.GetRunningPod()
+	if err != nil {
+		return nil, err
+	}
+
+	var workerInfo []controlplane.WorkerInfo
+	for _, pod := range allPods {
+		podRole := scheduler.GetPodInferenceRole(pod)
+		endpoint := scheduler.GetInferencePodEndpoint(pod)
+		modelGroup := scheduler.GetPodModelGroup(pod)
+		node := s.registry.GetNode(pod.Spec.NodeName)
+		if node == nil {
+			log.Printf("node not found in registry %s", pod.Spec.NodeName)
+			continue
+		}
+		if podRole == types.Unknown {
+			continue
+		}
+		routable := endpoint != ""
+		switch podRole {
+		case types.Prefill, types.Decode:
+			routable = routable && modelGroup != ""
+		case types.Unified:
+			// endpoint-only is enough for unified
+		default:
+			routable = false
+		}
+		workerInfo = append(workerInfo, controlplane.WorkerInfo{
+			ID:           fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
+			Role:         podRole,
+			State:        controlplane.Ready,
+			Routable:     routable,
+			GPU2GPUReady: node.HasNVLink,
+			Endpoint:     endpoint,
+			ModelGroup:   modelGroup,
+		})
+	}
+	return workerInfo, nil
 }
 
 func buildKubeClient() (kubernetes.Interface, *rest.Config, error) {

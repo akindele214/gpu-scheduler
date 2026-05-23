@@ -79,6 +79,11 @@ type pressureAggregate struct {
 	decodeWorkers   int
 }
 
+type pressureThresholds struct {
+	ttftHotMs float64
+	itlHotMs  float64
+}
+
 type pressureTracker struct {
 	current         controlplane.PressureState
 	prefillHotTicks int
@@ -90,10 +95,23 @@ type pressureTracker struct {
 func (p *Proxy) pressureLoop() {
 	const (
 		tickInterval           = 5 * time.Second
-		sustainTicksRequired   = 6
-		cooldownDuration       = 30 * time.Second
 		inflightDeltaThreshold = 1.0
 	)
+
+	sustainTicksRequired := 6
+	cooldownDuration := 30 * time.Second
+	if p.config != nil {
+		if p.config.Rebalancing.SustainWindowSeconds > 0 {
+			tickSeconds := int(tickInterval / time.Second)
+			sustainTicksRequired = (p.config.Rebalancing.SustainWindowSeconds + tickSeconds - 1) / tickSeconds
+			if sustainTicksRequired < 1 {
+				sustainTicksRequired = 1
+			}
+		}
+		if p.config.Rebalancing.CooldownSeconds > 0 {
+			cooldownDuration = time.Duration(p.config.Rebalancing.CooldownSeconds) * time.Second
+		}
+	}
 
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -164,10 +182,35 @@ func (p *Proxy) pressureLoop() {
 				if agg.decodeWorkers > 0 {
 					decodeAvgInflight = float64(agg.decodeInflight) / float64(agg.decodeWorkers)
 				}
+				prefillTTFT := 0.0
+				if agg.prefillTTFTN > 0 {
+					prefillTTFT = agg.prefillTTFTSum / float64(agg.prefillTTFTN)
+				}
+				decodeITL := 0.0
+				if agg.decodeITLN > 0 {
+					decodeITL = agg.decodeITLSum / float64(agg.decodeITLN)
+				}
 
 				canCompare := agg.prefillWorkers > 0 && agg.decodeWorkers > 0
-				prefillHot := canCompare && (prefillAvgInflight-decodeAvgInflight) >= inflightDeltaThreshold
-				decodeHot := canCompare && (decodeAvgInflight-prefillAvgInflight) >= inflightDeltaThreshold
+				prefillInflightDelta := prefillAvgInflight - decodeAvgInflight
+				decodeInflightDelta := decodeAvgInflight - prefillAvgInflight
+				prefillHot := canCompare && prefillInflightDelta >= inflightDeltaThreshold
+				decodeHot := canCompare && decodeInflightDelta >= inflightDeltaThreshold
+
+				if thresholds, ok := p.pressureThresholdsFor(group); ok {
+					prefillHot = prefillHot || (prefillTTFT > 0 && prefillTTFT >= thresholds.ttftHotMs)
+					decodeHot = decodeHot || (decodeITL > 0 && decodeITL >= thresholds.itlHotMs)
+
+					if prefillHot && decodeHot {
+						prefillScore := pressureScore(prefillTTFT, thresholds.ttftHotMs, prefillInflightDelta)
+						decodeScore := pressureScore(decodeITL, thresholds.itlHotMs, decodeInflightDelta)
+						if decodeScore >= prefillScore {
+							prefillHot = false
+						} else {
+							decodeHot = false
+						}
+					}
+				}
 
 				switch {
 				case prefillHot:
@@ -208,12 +251,8 @@ func (p *Proxy) pressureLoop() {
 				report.ModelGroup = group
 				report.PressureState = tracker.current
 				report.Inflight = agg.prefillInflight + agg.decodeInflight
-				if agg.prefillTTFTN > 0 {
-					report.TTFTP95 = agg.prefillTTFTSum / float64(agg.prefillTTFTN)
-				}
-				if agg.decodeITLN > 0 {
-					report.ITLP95 = agg.decodeITLSum / float64(agg.decodeITLN)
-				}
+				report.TTFTP95 = prefillTTFT
+				report.ITLP95 = decodeITL
 				report.Timestamp = now
 			}
 			p.mu.Unlock()
@@ -221,6 +260,38 @@ func (p *Proxy) pressureLoop() {
 			return
 		}
 	}
+}
+
+func (p *Proxy) pressureThresholdsFor(modelGroup string) (pressureThresholds, bool) {
+	if p == nil || p.config == nil {
+		return pressureThresholds{}, false
+	}
+
+	modelGroup = strings.TrimSpace(modelGroup)
+	for _, group := range p.config.Rebalancing.ModelGroups {
+		if strings.TrimSpace(group.Name) != modelGroup {
+			continue
+		}
+		if group.TTFTHotMs <= 0 || group.ITLHotMs <= 0 {
+			return pressureThresholds{}, false
+		}
+		return pressureThresholds{
+			ttftHotMs: float64(group.TTFTHotMs),
+			itlHotMs:  float64(group.ITLHotMs),
+		}, true
+	}
+	return pressureThresholds{}, false
+}
+
+func pressureScore(metric float64, threshold float64, inflightDelta float64) float64 {
+	score := 0.0
+	if threshold > 0 && metric > 0 {
+		score = metric / threshold
+	}
+	if inflightDelta > score {
+		score = inflightDelta
+	}
+	return score
 }
 
 func (p *Proxy) inferenceWorkerLoop() {

@@ -289,43 +289,19 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 		if intent.IsDisagg {
 			// result, err = w.allocator.AllocateWithRouting(pod, job)
 			preferredNodes := w.resolveDisaggPreferredNodes(pod, intent)
-			candidates := w.registry.FindAvailableNonMPSGPU(job.MemoryMB)
-
-			for _, node := range preferredNodes {
-				for _, candidate := range candidates {
-					if node != candidate.NodeName {
-						continue
-					}
-					result = &types.SchedulingResult{
-						JobID:     job.ID,
-						NodeName:  candidate.NodeName,
-						GPUIDs:    []string{candidate.GPUUUID},
-						Success:   true,
-						Reason:    fmt.Sprintf("Allocated full GPU %s (%s)", candidate.GPUModel, candidate.GPUUUID),
-						Timestamp: time.Now(),
-						IsMIG:     false,
-					}
-					break
-				}
-				if result != nil {
-					break
-				}
-			}
-			if result == nil {
-				bestCandidate := allocator.SelectBestFullGPU(candidates, false)
-				if bestCandidate == nil {
-					err = fmt.Errorf("unable to fit pod in non-shared gpu")
-				} else {
-					err = nil
-					result = &types.SchedulingResult{
-						JobID:     job.ID,
-						NodeName:  bestCandidate.NodeName,
-						GPUIDs:    []string{bestCandidate.GPUUUID},
-						Success:   true,
-						Reason:    fmt.Sprintf("Allocated full GPU %s (%s)", bestCandidate.GPUModel, bestCandidate.GPUUUID),
-						Timestamp: time.Now(),
-						IsMIG:     false,
-					}
+			candidate := selectDisaggFullGPUCandidate(nodes, preferredNodes, job.MemoryMB)
+			if candidate == nil {
+				err = fmt.Errorf("unable to fit pod in non-shared gpu")
+			} else {
+				err = nil
+				result = &types.SchedulingResult{
+					JobID:     job.ID,
+					NodeName:  candidate.NodeName,
+					GPUIDs:    []string{candidate.GPUID},
+					Success:   true,
+					Reason:    fmt.Sprintf("Allocated full GPU %s", candidate.GPUID),
+					Timestamp: time.Now(),
+					IsMIG:     false,
 				}
 			}
 		} else {
@@ -472,6 +448,68 @@ func (w *Watcher) resolveDisaggPreferredNodes(pod *corev1.Pod, intent *types.Dis
 		}
 	}
 	return append(complementaryNodes, fallbackNodes...)
+}
+
+type disaggFullGPUCandidate struct {
+	NodeName     string
+	GPUID        string
+	FreeMemoryMB int
+}
+
+func selectDisaggFullGPUCandidate(nodes []types.NodeInfo, preferredNodes []string, memoryMB int) *disaggFullGPUCandidate {
+	candidates := collectDisaggFullGPUCandidates(nodes, memoryMB)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	for _, preferredNode := range preferredNodes {
+		if candidate := selectBestDisaggFullGPUCandidateForNode(candidates, preferredNode); candidate != nil {
+			return candidate
+		}
+	}
+
+	return selectBestDisaggFullGPUCandidate(candidates)
+}
+
+func collectDisaggFullGPUCandidates(nodes []types.NodeInfo, memoryMB int) []disaggFullGPUCandidate {
+	candidates := []disaggFullGPUCandidate{}
+	for _, node := range nodes {
+		for _, gpu := range node.GPUs {
+			freeMemoryMB := gpu.AvailableMemoryMB()
+			if !gpu.IsHealthy || gpu.IsMPS || gpu.AllocatedPods > 0 || freeMemoryMB < memoryMB {
+				continue
+			}
+			candidates = append(candidates, disaggFullGPUCandidate{
+				NodeName:     node.Name,
+				GPUID:        gpu.ID,
+				FreeMemoryMB: freeMemoryMB,
+			})
+		}
+	}
+	return candidates
+}
+
+func selectBestDisaggFullGPUCandidateForNode(candidates []disaggFullGPUCandidate, nodeName string) *disaggFullGPUCandidate {
+	var matching []disaggFullGPUCandidate
+	for _, candidate := range candidates {
+		if candidate.NodeName == nodeName {
+			matching = append(matching, candidate)
+		}
+	}
+	return selectBestDisaggFullGPUCandidate(matching)
+}
+
+func selectBestDisaggFullGPUCandidate(candidates []disaggFullGPUCandidate) *disaggFullGPUCandidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+	best := candidates[0]
+	for _, candidate := range candidates[1:] {
+		if candidate.FreeMemoryMB < best.FreeMemoryMB {
+			best = candidate
+		}
+	}
+	return &best
 }
 
 func (w *Watcher) reconcileExistingPods() {

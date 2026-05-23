@@ -26,6 +26,13 @@ func Load() (*Config, error) {
 	viper.SetDefault("scheduler.preemptionEnabled", false)
 	viper.SetDefault("scheduler.checkpointTimeoutSeconds", 60)
 	viper.SetDefault("scheduler.preemptionGracePeriod", 30)
+	viper.SetDefault("rebalancing.enabled", false)
+	viper.SetDefault("rebalancing.dry_run", true)
+	viper.SetDefault("rebalancing.tick_interval_seconds", 5)
+	viper.SetDefault("rebalancing.sustain_window_seconds", 30)
+	viper.SetDefault("rebalancing.cooldown_seconds", 90)
+	viper.SetDefault("rebalancing.allow_scale_up", true)
+	viper.SetDefault("rebalancing.allow_scale_down", false)
 
 	// Set up viper to read the config.yaml file
 	viper.SetConfigName("config") // Config file name without extension

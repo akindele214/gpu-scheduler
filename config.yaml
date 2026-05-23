@@ -26,20 +26,49 @@ logging:
   format: "json"
 
 workflows:
-  training:
-    priority: 100
-    scheduling: "binpack"
-  inference:
-    priority: 200
-    scheduling: "fifo"
-  batch:
-    priority: 50
-    scheduling: "binpack"
+  enabled: true
+  allowCustom: true
+  defaultPriority: 50
+  types:
+    - name: "inference"
+      priority: 90
+      preemptible: false
+    - name: "training"
+      priority: 70
+      preemptible: true
+    - name: "build"
+      priority: 40
+      preemptible: true
   
 proxy:
   enabled: true
   port: 8080
   scheduler_url: "http://localhost:8888"
+
+rebalancing:
+  enabled: true
+  dry_run: true
+  tick_interval_seconds: 5
+  sustain_window_seconds: 15
+  cooldown_seconds: 60
+  allow_scale_up: true
+  allow_scale_down: false
+
+  model_groups:
+    - name: "Qwen/Qwen2.5-7B-Instruct"
+      ttft_hot_ms: 200
+      itl_hot_ms: 80
+      max_prefill_workers: 2
+      max_decode_workers: 2
+      execution_script: "examples/inference/inference-disagg-rebalance.sh"
+
+    - name: "Qwen/Qwen2.5-14B-Instruct"
+      ttft_hot_ms: 400
+      itl_hot_ms: 120
+      max_prefill_workers: 2
+      max_decode_workers: 1
+      execution_script: ""
+
 # scheduler:
 #   name: "gpu-scheduler"
 #   port: 8888

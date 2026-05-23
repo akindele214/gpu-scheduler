@@ -179,8 +179,12 @@ func (r *Registry) FindAvailableFullGPU(minMemoryMB int) []GPUCandidate {
 				continue
 			}
 
-			// Subtract scheduler reservations from agent-reported free memory
+			// Prefer agent-reported free memory, but tolerate older/partial
+			// reports that only include total and used memory.
 			freeMB := gpu.FreeMemoryMB
+			if freeMB == 0 && gpu.TotalMemoryMB > gpu.UsedMemoryMB {
+				freeMB = gpu.TotalMemoryMB - gpu.UsedMemoryMB
+			}
 			if nodeReservations != nil {
 				freeMB -= nodeReservations[gpu.UUID]
 			}
@@ -433,6 +437,7 @@ func (r *Registry) GetNodes() []types.NodeInfo {
 				IsHealthy:          g.IsHealthy,
 				AllocatedPods:      podCount,
 				IsShared:           false,
+				IsMPS:              g.MPSEnabled,
 			}
 			gpus = append(gpus, gpu)
 			if g.IsHealthy {
