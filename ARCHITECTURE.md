@@ -1,490 +1,404 @@
 # GPU Scheduler Architecture
 
-## Overview
+GPU-Scheduler is a Kubernetes-native GPU control plane for memory-aware scheduling, gang placement, preemption, shared GPU routing, and inference-aware rebalancing.
 
-A Kubernetes-native GPU scheduler that provides memory-aware allocation, gang scheduling, priority preemption with checkpointing, and shared GPU support via a mutating webhook. Runs in **Standalone** mode — polls for pending pods and binds them directly to nodes.
+It runs without CRDs or an operator. Pods opt in through annotations and `schedulerName: gpu-scheduler`.
 
-```
-                              +--------------------------+
-                              |     GPU Scheduler        |
-                              |   (localhost:8888)       |
-                              +-----------+--------------+
-                                          |
-                  +-----------------------+-----------------------+
-                  |                       |                       |
-          +-------v-------+     +--------v--------+     +--------v--------+
-          |   Watcher     |     |    Webhook       |     |   HTTP Server   |
-          | Polls pending |     |  (Mutating,      |     | (Agent Reports) |
-          | pods, binds   |     |   Shared GPU)    |     |  :8888/report   |
-          |               |     |   :8443          |     +---------+-------+
-          +---+-----------+     +---------+--------+               |
-              |                           |                +-------v-------+
-              v                           v                | GPU Agent (1) |
-    +---------+----------+     Removes nvidia.com/gpu      | GPU Agent (2) |
-    |                    |     Injects VISIBLE_DEVICES     | ...per node   |
-    |   Scheduling       |                                 +---------------+
-    |   Pipeline         |                                   Reports GPU
-    |                    |                                   stats via NVML
-    | 1. Priority sort   |                                   every 5s
-    | 2. Gang collect    |
-    | 3. Schedule gangs  |           +------------------+
-    | 4. Schedule solo   |           |    Registry      |
-    | 5. Preempt if      +---------->|  (Live GPU State)|
-    |    needed          |           |  Agent telemetry |
-    +--------------------+           |  + reservations  |
-                                     +------------------+
-```
-
-## Pod Allocation Lifecycle
-
-### Standard Pod (Single GPU)
+## System View
 
 ```
-1. USER submits pod
-   kubectl apply -f pod.yaml
-   (schedulerName: gpu-scheduler, memory-mb: "8192")
-        │
-        ▼
-2. WATCHER picks up pod (polling every 5s)
-   - Pod is Pending + no NodeName + schedulerName matches
-   - Sorted by priority (highest first)
-        │
-        ▼
-3. ROUTING decides GPU pool
-   - Checks gpu-scheduler.io/pool label (mig / full / auto)
-   - Auto: checks if any MIG instances fit, else uses full GPU
-        │
-        ▼
-4. BINPACK selects best GPU
-   - Scans all nodes from Registry (live agent data)
-   - Picks GPU with least waste (available - requested)
-   - Shared pods: prefers GPUs already shared
-   - Rejects if no GPU has enough free memory
-        │
-        ▼
-5. REGISTRY reserves memory
-   - MarkGPUAllocatedForPod(node, gpuID, memoryMB, ns, name)
-   - Adds entry to podAllocations map
-   - GPU's UsedMemoryMB increases immediately
-        │
-        ▼
-6. ANNOTATE pod with assignment
-   - Patches pod annotations:
-     gpu-scheduler/assigned-gpus: "GPU-e3bd61ca-..."
-     gpu-scheduler/allocation-type: "full" (or "mig")
-        │
-        ▼
-7. BIND pod to node
-   - Creates a Binding object via K8s API
-   - Kubelet starts the container on that node
-        │
-        ▼
-8. POD RUNS on the assigned GPU
-   - GPU agent continues reporting actual usage via NVML
-   - Registry holds both reserved and actual memory
-        │
-        ▼
-9. POD COMPLETES (or is deleted)
-   - Informer fires UpdateFunc (phase=Succeeded/Failed) or DeleteFunc
-   - Registry.ReleasePod(ns, name) frees all reserved memory
-   - GPU's UsedMemoryMB decreases back
+                         +-----------------------------+
+                         |        GPU Scheduler        |
+                         |           :8888             |
+                         +--------------+--------------+
+                                        |
+        +-------------------------------+-------------------------------+
+        |                               |                               |
++-------v--------+             +--------v--------+             +--------v--------+
+|    Watcher     |             |   HTTP API      |             |   Dashboard     |
+| Pending pods   |             | Agent reports   |             | Embedded UI     |
+| Bindings       |             | Worker registry |             | Logs/status     |
++-------+--------+             | Pressure fetch  |             +-----------------+
+        |                      +--------+--------+
+        |                               ^
+        v                               |
++-------+--------+             +--------+--------+             +-----------------+
+|   Scheduler    |             |    GPU Agent    |             | Inference Proxy |
+|   Pipeline     |             | Per GPU node    |             | :8080           |
+| Binpack        |             | NVML telemetry  |             | Routing         |
+| Gang           |             +-----------------+             | Metrics         |
+| Preemption     |                                             | Pressure report |
+| Inference role |                                             +--------+--------+
++-------+--------+                                                      |
+        |                                                               |
+        v                                                               v
++-------+--------+                                             +--------+--------+
+| GPU Registry   |                                             | vLLM Workers    |
+| Actual memory  |                                             | Unified         |
+| Reservations   |                                             | Prefill         |
+| Pod ownership  |                                             | Decode          |
++----------------+                                             +-----------------+
 ```
 
-### Gang Pod (Multi-Pod Distributed Training)
+## Main Responsibilities
+
+| Component | Responsibility |
+|-----------|----------------|
+| Scheduler process | Owns scheduling loop, HTTP API, dashboard, rebalancing ticker, and webhook server |
+| Watcher | Polls pending pods, orders work, schedules pods, binds pods to nodes |
+| GPU registry | Merges live GPU telemetry with scheduler-side reservations |
+| GPU agent | Reports GPU UUIDs, memory, utilization, health, MPS, MIG, and NVLink state |
+| Allocator | Handles full GPU, MIG, MPS, binpack, FIFO, and gang placement strategies |
+| Preemption orchestrator | Checkpoints and evicts lower-priority preemptible pods when enabled |
+| Inference proxy | Routes inference traffic, tracks worker pressure, exposes pressure reports |
+| Rebalancer | Evaluates TTFT/ITL pressure and decides whether to add/remove prefill/decode capacity |
+| Execution script | Applies additive inference manifests for controlled live rebalancing |
+
+## Core Scheduling Flow
 
 ```
-1. USER submits N pods with same gang-id
-   kubectl apply -f training-gang.yaml
-   (gang-id: "ddp-001", gang-size: "4")
-        │
-        ▼
-2. GANG COLLECTOR groups pending pods by gang-id
-   - Counts pods per gang-id
-   - Gang is "ready" when count == gang-size
-   - Incomplete gangs wait (up to gangTimeoutSeconds)
-        │
-        ▼
-3. MULTI-POD GANG SCHEDULER places all pods atomically
-   - Deep-copies node state (shadow copy)
-   - Places pod 1 → subtracts resources from shadow
-   - Places pod 2 → subtracts from shadow
-   - ... repeats for all N pods
-   - If ANY pod fails to place → entire gang fails (all-or-nothing)
-        │
-        ▼
-4. ON SUCCESS: mark, annotate, bind each pod
-   - Same steps 5-7 as standard pod, for each gang member
-   - Pods may land on different nodes (cross-node gang)
-        │
-        ▼
-5. ALL WORKERS RUN simultaneously
-   - Each worker has its own GPU on potentially different nodes
-        │
-        ▼
-6. CLEANUP same as standard pod (per-pod release)
+Pod submitted
+  -> schedulerName is gpu-scheduler
+  -> Watcher sees Pending pod with no NodeName
+  -> Priority sort
+  -> Gang collector separates gang pods from standalone pods
+  -> Scheduler parses annotations
+  -> Allocator picks GPU placement
+  -> Registry reserves GPU memory
+  -> Scheduler patches assigned GPU annotations
+  -> Scheduler creates Kubernetes Binding
+  -> Kubelet starts pod on assigned node
+  -> Informer releases reservation when pod completes/deletes
 ```
 
-### Preemption Flow
-
-```
-1. HIGH-PRIORITY POD can't be scheduled
-   - No GPU has enough free memory
-   - preemptionOrchestrator is enabled
-        │
-        ▼
-2. BUILD CANDIDATES list
-   - Lists all running pods managed by gpu-scheduler
-   - Skips pods already being evicted (pendingEvictions map)
-   - Collects: priority, workflow, preemptible flag, GPU IDs, memory
-        │
-        ▼
-3. SELECT VICTIMS
-   - Filters to only preemptible pods with lower priority
-   - Never evicts "build" workflow pods
-   - Picks minimal set to free enough resources
-        │
-        ▼
-4. CHECKPOINT each victim
-   - Reads gpu-scheduler/checkpoint-cmd annotation
-   - Executes command inside the pod via SPDY/remotecommand
-   - Waits up to checkpointTimeoutSeconds
-        │
-        ▼
-5. DELETE each victim
-   - Deletes pod with gracePeriodSeconds
-   - Adds to pendingEvictions map (prevents re-eviction)
-   - Publishes "pod-preempted" SSE event
-        │
-        ▼
-6. AUTO-RESUME (if enabled)
-   - Checks gpu-scheduler/auto-resume: "true" annotation
-   - Checks preempt-count < autoResumeMaxRetries
-   - Creates new pod with:
-     • Name: <original>-resume-<count> (strips prior -resume-N suffix)
-     • Boosted priority: original + (boost × count), capped at 100
-     • Preferred node affinity for checkpoint data locality
-     • Runtime annotations stripped (assigned-gpus, allocation-type)
-   - Publishes "pod-resumed" SSE event
-        │
-        ▼
-7. INFORMER fires DeleteFunc
-   - Registry.ReleasePod() frees the GPU memory
-   - Removes from pendingEvictions map
-        │
-        ▼
-8. NEXT CYCLE: high-priority pod retries + resumed pod queues
-   - GPU now has free memory
-   - High-priority pod schedules normally
-   - Resumed pod waits in pending until resources are available
-```
-
-### Shared GPU Flow
-
-```
-1. USER submits pod with shared: "true"
-        │
-        ▼
-2. MUTATING WEBHOOK intercepts (before scheduling)
-   - Removes nvidia.com/gpu resource limit
-     (so device plugin doesn't claim exclusive GPU)
-   - Injects NVIDIA_VISIBLE_DEVICES=all
-   - Injects CUDA_MPS_PIPE_DIRECTORY
-        │
-        ▼
-3. SCHEDULER places pod using memory-aware binpack
-   - BinPack prefers GPUs already shared (packs tightly)
-   - Multiple pods can land on same GPU
-   - Each pod's memory is tracked separately in Registry
-        │
-        ▼
-4. PODS SHARE the physical GPU
-   - Both see the GPU via NVIDIA_VISIBLE_DEVICES=all
-   - Memory isolation is logical (scheduler-tracked), not hardware-enforced
-```
-
-## System Components
-
-### GPU Agent (`cmd/gpu-agent/`)
-
-Lightweight binary deployed on each GPU node. Uses NVML to discover GPUs and report telemetry to the scheduler every 5 seconds.
-
-Reports include: GPU UUIDs, total/used memory, utilization, temperature, health status, and MIG instance details.
-
-```
-Node (RTX 3060)                    Node (RTX 4060)
-+---------------+                  +---------------+
-| gpu-agent     |---HTTP POST----->| gpu-scheduler |
-| --node-name=  |  /report/gpu    | (central)     |
-| --scheduler=  |                  +---------------+
-+---------------+                         ^
-                                          |
-                          +---------------+
-                          | gpu-agent     |
-                          | --node-name=  |
-                          | --scheduler=  |
-                          +---------------+
-```
-
-### Registry (`internal/gpu/registry.go`)
-
-Central source of truth for GPU state across the cluster. Merges live agent telemetry with scheduler-side reservation tracking (dual-layer memory model).
-
-- **Actual memory**: Reported by gpu-agent via NVML (what's really in use)
-- **Reserved memory**: Tracked by scheduler (what's been promised to pods)
-
-The higher of the two is used for scheduling decisions, preventing over-commitment.
-
-```go
-type Registry struct {
-    nodes          map[string]*types.NodeInfo  // node -> GPUs
-    podAllocations map[string]*PodAllocation   // "ns/name" -> GPU entries
-}
-```
-
-### Allocator (`internal/allocator/`)
-
-Routes pods to the right GPU type and applies bin-packing.
-
-**Routing** (`routing.go`): Classifies pods by pool preference (MIG, Full, Auto) based on annotations:
-
-- `gpu-scheduler.io/pool: "mig"` - Prefer MIG instances
-- `gpu-scheduler.io/pool: "full"` - Prefer full GPUs
-- No annotation - Auto-select based on memory request
-
-**BinPacker** (`binpack.go`): Best-fit algorithm that minimizes wasted GPU memory. For multi-GPU requests, `ScheduleGang` finds a single node with N GPUs that each have sufficient free memory.
-
-**Multi-Pod Gang** (`gang_multi_pod.go`): Atomic placement of N separate pods across the cluster. Uses a shadow copy of node state to simulate placements — all-or-nothing.
-
-### Scheduler / Watcher (`internal/scheduler/watcher.go`)
-
-The core scheduling loop:
-
-```
-Every 5 seconds:
-  1. List all pending pods with schedulerName=gpu-scheduler
-  2. Sort by priority (highest first)
-  3. Collect gang pods (GangCollector groups by gang-id)
-  4. Schedule ready gangs atomically (all pods present)
-  5. Schedule standalone pods individually
-  6. On failure: attempt preemption if enabled
-  7. On success: annotate pod with GPU UUIDs, bind to node
-```
-
-### Gang Collector (`internal/scheduler/gang.go`)
-
-Groups pending pods into gangs based on annotations:
+### Important Pod Annotations
 
 ```yaml
-annotations:
-  gpu-scheduler/gang-id: "ddp-training-001"
-  gpu-scheduler/gang-size: "4"
+metadata:
+  annotations:
+    gpu-scheduler/memory-mb: "20000"
+    gpu-scheduler/gpu-count: "1"
+    gpu-scheduler/workflow: "inference"
+    gpu-scheduler/priority: "90"
+    gpu-scheduler/shared: "false"
+spec:
+  schedulerName: gpu-scheduler
 ```
 
-A gang is "ready" when all N pods are pending. Gangs that remain incomplete past the timeout are logged as timed out.
+The scheduler treats annotations as scheduling intent. Kubernetes still owns pod lifecycle; GPU-Scheduler owns placement decisions for opted-in pods.
 
-### Preemption (`internal/scheduler/preemption.go`)
+## GPU Registry Model
 
-When a high-priority pod can't be scheduled:
+The registry keeps two related views of GPU state:
 
-1. **VictimSelector**: Finds the minimal set of lower-priority, preemptible pods to evict
-2. **Checkpoint**: Executes the victim's `gpu-scheduler/checkpoint-cmd` annotation via `kubectl exec`
-3. **Delete**: Removes the victim pod with a grace period
-4. **Auto-Resume**: If the victim has `auto-resume: "true"`, creates a new pod with boosted priority
-5. **Retry**: Scheduler retries the requester on the next cycle
+- **Actual usage**: reported by the GPU agent through NVML.
+- **Reserved usage**: tracked by the scheduler when it assigns pods.
 
-Rules:
+This matters because a pod may be scheduled before NVML reflects its real memory usage. Reservations prevent overscheduling during that window.
 
-- Never preempt `build` workflow pods
-- Only preempt pods with strictly lower priority
-- Pods must have `gpu-scheduler/preemptible: "true"` annotation
-- Eviction dedup prevents repeated preemption of the same pod
+```
+GPU agent report
+  -> actual used/free memory
+  -> health, MPS, MIG, NVLink
 
-Auto-Resume:
-
-- Opted in via `gpu-scheduler/auto-resume: "true"` annotation
-- Resumed pods get priority boost: `original + (autoResumePriorityBoost × preemptCount)`, capped at 100
-- Original priority is preserved in `gpu-scheduler/original-priority` annotation
-- Stops after `autoResumeMaxRetries` preemptions (default: 3)
-- Resumed pods prefer the same node (for checkpoint data locality) via preferred node affinity
-- Events published to SSE bus: `pod-preempted`, `pod-resumed`
-
-### PodExecutor (`internal/scheduler/executor.go`)
-
-Interface for executing commands in pods and deleting pods. The `K8sExecutor` implementation uses SPDY/remotecommand for `ExecInPod` (real `kubectl exec` equivalent).
-
-```go
-type PodExecutor interface {
-    ExecInPod(ctx, namespace, podName, container string, cmd []string) error
-    DeletePod(ctx, namespace, podName string, gracePeriodSeconds int64) error
-    CreatePod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error)
-}
+Scheduler reservation
+  -> pod namespace/name
+  -> assigned GPU UUID
+  -> requested memory
+  -> released on pod completion/deletion
 ```
 
-### Mutating Webhook (`internal/scheduler/webhook.go`)
+For scheduling, the watcher primarily uses the reservation-aware node snapshot from the registry. This keeps placement decisions aligned with the same GPU state shown in scheduler logs.
 
-HTTPS webhook server that intercepts pod creation for shared GPU pods (`gpu-scheduler/shared: "true"`):
+## Standalone Watcher
 
-1. Injects `NVIDIA_VISIBLE_DEVICES=all` environment variable
-2. Injects `CUDA_MPS_PIPE_DIRECTORY` for MPS support
-3. Adds scheduler annotations (assigned GPUs, memory)
-4. **Removes** `nvidia.com/gpu` resource limits so the device plugin doesn't claim exclusive GPU access
+The watcher is the scheduler's core loop in standalone mode:
 
-This enables multiple pods to share a single physical GPU with memory isolation managed by the scheduler.
+```
+Every poll interval:
+  1. List pending pods
+  2. Keep pods with schedulerName=gpu-scheduler and no NodeName
+  3. Sort by priority
+  4. Collect ready gangs
+  5. Schedule gangs atomically
+  6. Schedule standalone pods
+  7. Attempt preemption on no-capacity failures
+  8. Publish events/dashboard updates
+```
 
-### Metrics (`internal/metrics/prometheus.go`)
+Standalone mode binds pods directly with the Kubernetes API. It does not depend on the default Kubernetes scheduler for GPU placement.
 
-Prometheus metrics exported at `/metrics`:
+## Allocation Modes
 
-| Metric                               | Type      | Description                         |
-| ------------------------------------ | --------- | ----------------------------------- |
-| `gpu_scheduler_jobs_scheduled`     | Counter   | Pods scheduled, by node             |
-| `gpu_scheduler_jobs_failed`        | Counter   | Scheduling failures, by reason      |
-| `gpu_scheduler_pending_pods`       | Gauge     | Current pending pod count           |
-| `gpu_scheduler_scheduling_latency` | Histogram | Time to schedule a pod              |
-| `gpu_scheduler_gang_attempts`      | Counter   | Gang scheduling attempts, by status |
-| `gpu_scheduler_preemptions`        | Counter   | Preemption events                   |
+### Full GPU
 
-## Pod Annotations Reference
+Non-shared pods are placed on a full GPU with enough available reserved memory. For disaggregated inference pods, the scheduler also avoids GPUs already assigned to another pod.
+
+### MIG
+
+Pods can request MIG routing with labels:
 
 ```yaml
 metadata:
   labels:
-    gpu-scheduler.io/pool: "mig"         # GPU pool: "mig", "full", or omit for auto
-  annotations:
-    # Memory & GPU
-    gpu-scheduler/memory-mb: "6144"       # Required GPU memory per GPU (MB)
-    gpu-scheduler/gpu-count: "4"          # Number of GPUs needed (default: 1)
-    gpu-scheduler/memory-mode: "per-gpu"  # "per-gpu" or "total"
-    gpu-scheduler/shared: "true"          # Enable GPU sharing (multiple pods per GPU)
-
-    # Workflow & Priority
-    gpu-scheduler/workflow: "training"    # "build", "training", or "inference"
-    gpu-scheduler/priority: "95"          # 0-100, higher = more important
-
-    # Gang Scheduling
-    gpu-scheduler/gang-id: "job-001"      # Gang group identifier
-    gpu-scheduler/gang-size: "4"          # Total pods in the gang
-
-    # Preemption
-    gpu-scheduler/preemptible: "true"     # Can this pod be evicted?
-    gpu-scheduler/checkpoint-cmd: "..."   # Command to run before eviction
-    gpu-scheduler/resume-cmd: "..."       # Command to run on restart
-    gpu-scheduler/auto-resume: "true"     # Auto-recreate pod after preemption
-
-    # Auto-Resume (set by scheduler, read-only)
-    gpu-scheduler/preempt-count: "1"      # Times this pod has been preempted
-    gpu-scheduler/original-priority: "50" # Priority before any boost
-
-spec:
-  schedulerName: gpu-scheduler            # Required
+    gpu-scheduler.io/pool: "mig"
 ```
 
-## Directory Structure
+If no pool is specified, auto-routing can choose MIG when a fitting MIG instance exists.
 
-```
-gpu-scheduler/
-├── cmd/
-│   ├── scheduler/
-│   │   └── main.go              # Scheduler entry point
-│   └── gpu-agent/
-│       └── main.go              # GPU agent entry point
-├── internal/
-│   ├── agent/
-│   │   └── agent.go             # NVML-based GPU reporter
-│   ├── allocator/
-│   │   ├── allocator.go         # Routing (MIG/Full/Auto)
-│   │   ├── binpack.go           # Bin-packing strategy
-│   │   ├── fifo.go              # FIFO strategy
-│   │   ├── gang_multi_pod.go    # Multi-pod gang placement
-│   │   ├── routing.go           # Pool classification
-│   │   └── strategy.go          # SchedulingStrategy interface
-│   ├── config/
-│   │   ├── config.go            # Config types
-│   │   └── loader.go            # Viper config loader
-│   ├── gpu/
-│   │   ├── manager.go           # GPU state manager
-│   │   ├── registry.go          # Live GPU registry (agent data)
-│   │   ├── nvml.go              # NVML discoverer
-│   │   └── k8s_discoverer.go    # K8s API discoverer
-│   ├── metrics/
-│   │   └── prometheus.go        # Prometheus metrics
-│   └── scheduler/
-│       ├── watcher.go           # Standalone scheduling loop
-│       ├── gang.go              # Gang collector
-│       ├── preemption.go        # Victim selection + orchestrator
-│       ├── executor.go          # PodExecutor (exec/delete)
-│       ├── webhook.go           # Mutating webhook (shared GPU)
-│       ├── helpers.go           # Annotation parsing utilities
-│       ├── injector.go          # GPU UUID injection
-│       └── queue.go             # Job queue
-├── pkg/types/
-│   └── types.go                 # Shared types (Job, GPU, NodeInfo)
-├── deploy/
-│   ├── rbac.yaml                # ClusterRole + ServiceAccount
-│   ├── deployment.yaml          # Scheduler deployment
-│   ├── configmap.yaml           # Configuration
-│   └── mutating-webhook.yaml    # Webhook configuration
-├── examples/
-│   ├── single-node-gang/        # 4x GPU single node demo
-│   ├── multi-node-gang/         # Cross-node gang demo
-│   ├── priority-test/           # Preemption test pods
-│   ├── shared-gpu.yaml          # Shared GPU demo
-│   └── preemption-auto-resume.yaml # Preemption + auto-resume demo
-├── scripts/
-│   ├── setup-k3s-worker.sh      # k3s worker setup
-│   └── deploy-agent.sh          # GPU agent deployment
-├── config.yaml                  # Local config
-├── Dockerfile
-└── README.md
-```
+### Shared GPU / MPS
 
-## Configuration
+Shared pods use:
 
 ```yaml
-scheduler:
-  mode: "standalone"
-  name: "gpu-scheduler"
-  preemptionEnabled: true
-  checkpointTimeoutSeconds: 60
-  preemptionGracePeriod: 30
-  autoResumeMaxRetries: 3
-  autoResumePriorityBoost: 5
-  gangTimeoutSeconds: 300
-
-queue:
-  defaultPolicy: "binpack"        # "binpack" or "fifo"
-
-gpu:
-  mockMode: false
-  pollIntervalSeconds: 5
-
-workflows:
-  build:
-    priority: 100
-    preemptible: false
-  training:
-    priority: 50
-    preemptible: true
-  inference:
-    priority: 75
-    preemptible: false
+metadata:
+  annotations:
+    gpu-scheduler/shared: "true"
 ```
 
-## Deployment
+The webhook removes the exclusive `nvidia.com/gpu` resource request and injects runtime environment needed for NVIDIA MPS. Shared pods are routed only to MPS-enabled GPUs.
 
-Run scheduler + gpu-agent directly on each node:
+### Gang Scheduling
+
+Gang pods use:
+
+```yaml
+metadata:
+  annotations:
+    gpu-scheduler/gang-id: "ddp-job-001"
+    gpu-scheduler/gang-size: "4"
+```
+
+The gang collector waits until all gang members are pending, then schedules the set atomically. If one pod cannot fit, none of the gang is bound.
+
+## Preemption Flow
+
+Preemption is optional and priority-driven.
+
+```
+High-priority pod cannot fit
+  -> build list of running scheduler-managed pods
+  -> filter lower-priority preemptible candidates
+  -> select minimal victim set
+  -> run checkpoint command if configured
+  -> delete victims with grace period
+  -> optionally recreate victims with boosted priority
+  -> retry scheduling on next loop
+```
+
+Preemption rules:
+
+- Only lower-priority pods are candidates.
+- Pods must be marked `gpu-scheduler/preemptible: "true"`.
+- Build workflows are protected.
+- Auto-resume is opt-in through `gpu-scheduler/auto-resume: "true"`.
+- Runtime annotations like assigned GPU IDs are stripped from resumed pods.
+
+## Inference-Aware Architecture
+
+LLM inference has two different phases:
+
+- **Prefill**: processes prompts and builds KV cache. It mainly affects TTFT.
+- **Decode**: generates tokens one at a time. It mainly affects ITL/TPS.
+
+GPU-Scheduler models inference workers as roles:
+
+```yaml
+metadata:
+  annotations:
+    gpu-scheduler/workflow: "inference"
+    gpu-scheduler/inference-role: "prefill" # prefill | decode | unified
+    gpu-scheduler/model-group: "Qwen/Qwen2.5-7B-Instruct"
+    gpu-scheduler/inference-endpoint: "http://127.0.0.1:30101"
+```
+
+The proxy exposes worker state and pressure reports. The scheduler periodically evaluates those reports against model-group policy.
+
+```
+Client requests
+  -> Inference proxy
+  -> Prefill/decode workers
+  -> Proxy records TTFT, ITL/TPS, in-flight pressure
+  -> Scheduler fetches pressure reports
+  -> Rebalancer evaluates each model group
+  -> Decision: none | add_prefill | add_decode | remove_prefill | remove_decode
+  -> If dry_run=false, scheduler executes configured script action
+```
+
+## Rebalancing Control Loop
+
+The rebalancer runs on a ticker inside the scheduler process.
+
+```
+Every tick:
+  1. Fetch pressure reports from proxy
+  2. Collect current inference workers from scheduler control-plane state
+  3. For each configured model group:
+     - filter workers for that model group
+     - evaluate pressure state
+     - apply sustain window
+     - apply cooldown
+     - enforce max prefill/decode limits
+     - produce a decision
+  4. If dry_run=true, log only
+  5. If dry_run=false, dedupe in-progress pods
+  6. Execute scale action through configured script
+```
+
+Example live decode scale-up:
+
+```
+pressure=decode_hot
+  -> action=add_decode
+  -> script_action=scale-decode-up
+  -> apply inference-disagg-rebalance-add-decode.yaml
+  -> create inference-decode-1
+  -> watcher schedules pod onto free GPU
+  -> pod becomes Ready
+  -> proxy marks worker routable
+  -> next evaluation sees workers=3
+  -> reason=at_max_decode
+```
+
+## Rebalancing Safety Controls
+
+| Control | Purpose |
+|---------|---------|
+| `dry_run` | Log decisions without mutating the cluster |
+| Sustain window | Require pressure to remain hot before acting |
+| Cooldown | Prevent rapid repeated actions |
+| Max role caps | Stop runaway scale-up per model group |
+| Model-group policies | Keep multi-model deployments isolated |
+| Execution script per model group | Only approved model groups can mutate the cluster |
+| In-progress pod dedupe | Avoid scheduling another worker while one is Pending/Creating/Ready=false |
+| Kubernetes readiness wait | Script waits for new worker before returning success |
+
+## Inference Deployment Shape
+
+The current example uses static additive manifests:
+
+```
+apply-base
+  -> inference-prefill-0
+  -> inference-decode-0
+
+scale-prefill-up
+  -> adds inference-prefill-1
+
+scale-decode-up
+  -> adds inference-decode-1
+```
+
+The script is intentionally simple:
 
 ```bash
-# Apply RBAC (required for pod binding)
-kubectl apply -f deploy/rbac.yaml
-
-# Server node (runs scheduler + agent)
-./gpu-scheduler --kubeconfig=/etc/rancher/k3s/k3s.yaml --config=config.yaml &
-./gpu-agent --node-name=$(hostname) --scheduler-url=http://localhost:8888 &
-
-# Worker nodes (agent only, points to server)
-./gpu-agent --node-name=$(hostname) --scheduler-url=http://<SERVER_IP>:8888 &
-
-# If using shared GPU, apply the mutating webhook
-kubectl apply -f deploy/mutating-webhook.yaml
+examples/inference/inference-disagg-rebalance.sh apply-base
+examples/inference/inference-disagg-rebalance.sh scale-decode-up
+examples/inference/inference-disagg-rebalance.sh scale-prefill-up
+examples/inference/inference-disagg-rebalance.sh verify
 ```
+
+The scheduler calls the same script when `dry_run=false`.
+
+## Proxy Role
+
+The proxy is the serving-side control point:
+
+- Accepts OpenAI-compatible requests.
+- Routes requests to unified or prefill/decode workers.
+- Reports workers to the scheduler control plane.
+- Computes pressure states from request metrics.
+- Exposes pressure reports consumed by the scheduler rebalancer.
+
+Start it with:
+
+```bash
+GPU_SCHEDULER_PROXY_SCHEDULER_URL=http://localhost:8888 \
+GPU_SCHEDULER_PROXY_PORT=8080 \
+./proxy
+```
+
+## Configuration Shape
+
+```yaml
+proxy:
+  enabled: true
+  port: 8080
+  scheduler_url: "http://localhost:8888"
+
+rebalancing:
+  enabled: true
+  dry_run: true
+  tick_interval_seconds: 5
+  sustain_window_seconds: 30
+  cooldown_seconds: 90
+  allow_scale_up: true
+  allow_scale_down: false
+  model_groups:
+    - name: "Qwen/Qwen2.5-7B-Instruct"
+      ttft_hot_ms: 800
+      itl_hot_ms: 120
+      max_prefill_workers: 2
+      max_decode_workers: 2
+      execution_script: "examples/inference/inference-disagg-rebalance.sh"
+```
+
+## HTTP/API Surface
+
+The scheduler HTTP server handles:
+
+- GPU agent reports
+- dashboard assets/API
+- scheduler logs
+- inference worker inspection
+- proxy pressure fetch integration
+
+The proxy HTTP server handles:
+
+- OpenAI-compatible inference requests
+- worker routing
+- health checks
+- pressure/control endpoints
+
+## Directory Map
+
+```
+cmd/
+  scheduler/        Scheduler process
+  gpu-agent/        Per-node GPU reporter
+  proxy/            Inference proxy
+  benchmark/        Benchmark harness
+
+internal/
+  agent/            NVML provider and GPU report types
+  allocator/        Binpack, FIFO, routing, gang placement
+  config/           Config structs and loader
+  gpu/              Registry, manager, discoverers
+  proxy/            Inference proxy/router implementation
+  scheduler/        Watcher, preemption, rebalancer, webhook, helpers
+
+examples/
+  inference/        Unified/disaggregated vLLM examples and rebalance scripts
+  single-node-gang/ Gang scheduling example
+  multi-node-gang/  Cross-node gang example
+
+deploy/             RBAC and Kubernetes deployment manifests
+docs/images/        README/demo screenshots
+```
+
+## Verified End-to-End Path
+
+The inference-aware path has been validated on A100/H100-class hardware:
+
+```
+1P:1D deployment healthy
+  -> benchmark creates decode pressure
+  -> rebalancer logs add_decode
+  -> dry_run=false executes scale-decode-up
+  -> inference-decode-1 pod is created
+  -> watcher assigns a free GPU
+  -> pod becomes Ready/routable
+  -> subsequent ticks stop at max_decode_workers
+```
+
+That is the core proof: the scheduler can observe inference-phase pressure, mutate the cluster safely, and stop at a configured capacity boundary.

@@ -3,22 +3,21 @@ set -euo pipefail
 
 # ── configuration ─────────────────────────────────────────────────────────────
 
-SSH_KEY="vast-key"
-SSH_USER="root"
+SSH_KEY="<ssh_key>"
+SSH_USER="<ssh_user>"
 REMOTE_DIR="/root/gpu-agent"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 FORCE_NVLINK="${FORCE_NVLINK:-}"
 
 # Server details (for SSH tunnel from workers)
-SERVER="23.135.236.7:7454"
+SERVER="192.168.1.1:22"
 SERVER_IP="${SERVER%%:*}"
 SERVER_SSH_PORT="${SERVER##*:}"
 if [ "${SERVER_SSH_PORT}" = "${SERVER_IP}" ]; then SERVER_SSH_PORT=22; fi
 
 # Add nodes here as "ip:port:role" (role = server or worker)
 NODES=(
-  # "23.135.236.7:7454:server"
-  "23.135.236.7:30508:worker"
+  "192.168.1.1:22:worker"
 )
 
 # ── deploy ────────────────────────────────────────────────────────────────────
@@ -40,14 +39,13 @@ for entry in "${NODES[@]}"; do
   echo "Node name: ${NODE_NAME}"
 
   # Kill existing agent if running
-  # ${SSH_CMD} "pkill -f gpu-agent || true"
+  ${SSH_CMD} "pkill -f gpu-agent || true"
 
   # Sync source code to node
   echo "Syncing source code..."
   rsync -av \
     --exclude '.git' \
     --exclude 'bin' \
-    --exclude 'vast-key' \
     -e "ssh -i ${SSH_KEY} -p ${port}" \
     "${PROJECT_DIR}/" "${SSH_USER}@${ip}:${REMOTE_DIR}/"
 
@@ -97,5 +95,3 @@ done
 echo ""
 echo "=== Done. Deployed to ${#NODES[@]} node(s) ==="
 
-
-# ssh -i vast-key -p 30508 root@23.135.236.7 "chmod 600 ~/.ssh/tunnel-key && ssh -f -i ~/.ssh/tunnel-key -p 7454 -L 8888:localhost:8888 -N -o StrictHostKeyChecking=no root@23.135.236.7"

@@ -7,17 +7,21 @@
 
 ## Overview
 
-**GPU-Scheduler** is an open-source, lightweight Kubernetes GPU scheduler for teams sharing GPUs. Drop it into any k3s/kubeadm cluster and get memory-aware scheduling, GPU sharing, preemption with checkpoint/auto-resume, and a real-time dashboard — no CRDs, no operator, no vendor lock-in.
+**GPU-Scheduler** is an open-source, lightweight Kubernetes GPU scheduler for teams sharing GPUs. Drop it into any k3s/kubeadm cluster and get memory-aware scheduling, inference-aware prefill/decode rebalancing, GPU sharing, preemption with checkpoint/auto-resume, and a real-time dashboard — no CRDs, no operator, no vendor lock-in.
+
+It is built for both classic GPU workloads and modern LLM serving. For disaggregated inference, the scheduler understands **prefill**, **decode**, and **unified** workers, watches live pressure signals like TTFT and inter-token latency, and can add the specific worker type that is bottlenecked instead of blindly scaling generic replicas.
 
 ### Who Is This For?
 
 - **ML/AI teams (5-20 engineers)** sharing 2-16 GPUs and tired of manual coordination
 - **Research labs** that need fair GPU access without the overhead of Slurm or Run:ai
 - **Startups** running fine-tuning and inference on-prem or on cloud GPU instances
+- **Inference platform teams** experimenting with vLLM disaggregated serving, prefill/decode separation, and phase-aware autoscaling
 - Anyone who's hit the limits of the default Kubernetes scheduler with GPU workloads
 
 ### What It Does
 
+- **Inference-aware rebalancing**: Detects prefill vs decode pressure and scales the right worker role for vLLM-style disaggregated serving
 - **Memory-aware scheduling**: Tracks GPU memory at the MB level, not just GPU count — no more wasted capacity
 - **Gang scheduling**: Atomic all-or-nothing placement of distributed training pods (e.g., PyTorch DDP) across multiple nodes
 - **Priority preemption with auto-resume**: High-priority jobs checkpoint and evict lower-priority workloads, which are automatically re-queued with boosted priority
@@ -30,9 +34,74 @@
 ### Tested On
 
 - Single-node: 4x RTX 4090 (Vast.ai)
+- Disaggregated vLLM inference: A100/H100-class GPUs with NIXL KV transfer
 - Multi-node: RTX 3060 + RTX 4060 across Tailscale mesh
 - MPS shared GPU: 2 pods on RTX 3060 with EXCLUSIVE_PROCESS mode
 - Preemption with auto-resume: checkpoint → evict → re-queue → resume on RTX 3060
+
+## Inference-Aware Scheduling
+
+LLM inference is not one uniform workload. A request usually moves through two phases:
+
+- **Prefill** processes the input prompt and prepares the model's KV cache. This phase is usually compute-heavy and affects time to first token (TTFT).
+- **Decode** generates the response token by token. This phase is often memory-bandwidth/KV-cache heavy and affects inter-token latency (ITL) and tokens per second (TPS).
+
+At small scale, a single unified worker can run both phases on the same GPU. At higher scale, one phase can bottleneck the other. Disaggregated inference splits the system into dedicated prefill and decode workers so each phase can scale independently.
+
+GPU-Scheduler makes that split schedulable:
+
+- Tracks inference roles with pod annotations: `prefill`, `decode`, and `unified`
+- Groups workers by `model-group`, so multiple models can be managed independently
+- Reads pressure reports from the proxy, including TTFT and ITL/TPS signals
+- Applies sustain windows and cooldowns to avoid flapping
+- Supports dry-run mode before live cluster mutation
+- Executes controlled scale-up actions through an execution script
+- Deduplicates in-progress pods so it does not create a burst of duplicate workers
+- Enforces max prefill/decode worker caps per model group
+
+Example rebalancing flow:
+
+```
+Requests → Proxy metrics → Scheduler rebalancer
+  → decode_hot detected
+  → run scale-decode-up
+  → create inference-decode-1
+  → scheduler assigns a free GPU
+  → worker becomes ready/routable
+  → further decode scale-up blocked at max_decode_workers
+```
+
+This is different from generic horizontal pod autoscaling. The scheduler is not just asking "do we need more replicas?" It asks "which inference phase is hot, and which GPU worker role should be added?"
+
+### Screenshots
+
+**Dashboard overview**
+
+![Dashboard overview](docs/images/dashboard-overview.png)
+
+**Starting point: one prefill worker and one decode worker**
+
+![Inference workers before rebalancing](docs/images/inference-workers-before.png)
+
+**The scheduler detects decode pressure**
+
+![Decode-hot rebalancer log](docs/images/rebalancer-decode-hot.png)
+
+**The rebalancer executes the scale-up action**
+
+![Decode-hot scale-up command](docs/images/at-max-decode-safety-cap.png)
+
+**A new decode worker is created and becomes ready**
+
+![Decode worker created](docs/images/decode-worker-created.png)
+
+**After rebalancing: decode capacity has increased**
+
+![Inference workers after rebalancing](docs/images/inference-workers-after.png)
+
+**Safety cap: the scheduler stops at the configured max decode workers**
+
+![At max decode safety cap](docs/images/rebalancer-decode-hot-cmd.png)
 
 ## Quick Start
 
@@ -54,6 +123,9 @@ go build -o gpu-scheduler ./cmd/scheduler
 
 # Build GPU agent
 go build -o gpu-agent ./cmd/gpu-agent
+
+# Build inference proxy (needed for inference-aware routing/rebalancing)
+go build -o proxy ./cmd/proxy
 ```
 
 ### Deploy
@@ -71,6 +143,28 @@ kubectl apply -f deploy/rbac.yaml
 # For remote worker nodes, point agent to server IP
 ./gpu-agent --node-name=$(hostname) --scheduler-url=http://<SERVER_IP>:8888 &
 ```
+
+### Start Inference Proxy
+
+The inference-aware rebalancer uses the proxy as the control-plane bridge for worker discovery, routing, and pressure reports. Start it after the scheduler is listening on port `8888`:
+
+```bash
+GPU_SCHEDULER_PROXY_SCHEDULER_URL=http://localhost:8888 \
+GPU_SCHEDULER_PROXY_PORT=8080 \
+./proxy
+```
+
+Then deploy a vLLM inference example:
+
+```bash
+# Start with 1 prefill worker and 1 decode worker
+examples/inference/inference-disagg-rebalance.sh apply-base
+
+# Verify scheduler workers, worker health, proxy health, and a test request
+examples/inference/inference-disagg-rebalance.sh verify
+```
+
+For live rebalancing, keep `rebalancing.dry_run: true` first and confirm decisions in scheduler logs. When the policy looks correct, set `dry_run: false` and configure `execution_script` for the model group you want the scheduler to mutate.
 
 ### Submit a GPU Pod
 
@@ -238,6 +332,9 @@ metadata:
 | `gpu-scheduler/auto-resume` | `"true"` | Auto-recreate pod after preemption |
 | `gpu-scheduler/checkpoint-cmd` | `"python save.py"` | Run before eviction |
 | `gpu-scheduler/resume-cmd` | `"python restore.py"` | Command to resume from checkpoint |
+| `gpu-scheduler/inference-role` | `"prefill"`, `"decode"`, `"unified"` | Inference worker role for phase-aware routing/rebalancing |
+| `gpu-scheduler/model-group` | `"Qwen/Qwen2.5-7B-Instruct"` | Groups inference workers serving the same model |
+| `gpu-scheduler/inference-endpoint` | `"http://127.0.0.1:30102"` | Worker endpoint advertised to the proxy/control plane |
 
 ## Configuration
 
@@ -260,6 +357,22 @@ gpu:
   mockMode: false
   pollIntervalSeconds: 5
 
+rebalancing:
+  enabled: true
+  dry_run: true
+  tick_interval_seconds: 5
+  sustain_window_seconds: 15
+  cooldown_seconds: 60
+  allow_scale_up: true
+  allow_scale_down: false
+  model_groups:
+    - name: "Qwen/Qwen2.5-7B-Instruct"
+      ttft_hot_ms: 200
+      itl_hot_ms: 80
+      max_prefill_workers: 2
+      max_decode_workers: 2
+      execution_script: "examples/inference/inference-disagg-rebalance.sh"
+
 workflows:
   build:
     priority: 100
@@ -281,6 +394,9 @@ workflows:
 | [priority-test/](examples/priority-test/) | Low-priority + high-priority preemption demo |
 | [shared-gpu.yaml](examples/shared-gpu.yaml) | Two pods sharing one GPU |
 | [preemption-auto-resume.yaml](examples/preemption-auto-resume.yaml) | Preemption with auto-resume demo |
+| [inference-unified.yaml](examples/inference/inference-unified.yaml) | Unified vLLM inference worker |
+| [inference-disagg-rebalance.sh](examples/inference/inference-disagg-rebalance.sh) | Static 1P:1D deployment plus additive prefill/decode scale-up actions |
+| [rebalancer-dry-run-smoke.sh](examples/inference/rebalancer-dry-run-smoke.sh) | Smoke test for proxy pressure and rebalancer decisions |
 
 ## Architecture
 
@@ -309,6 +425,7 @@ go test ./internal/scheduler/...
 | | Default kube-scheduler | Slurm | Volcano | Run:ai / NVIDIA KAI | **GPU-Scheduler** |
 |--|----------------------|-------|---------|---------------------|-------------------|
 | GPU memory tracking | None | Basic | Basic | Deep | Per-MB via NVML |
+| Inference-aware prefill/decode rebalancing | No | No | No | Limited/custom | Yes |
 | Gang scheduling | No | Yes | Yes (CRDs) | Yes | Yes (annotations) |
 | Preemption + auto-resume | No | No | No | Yes | Yes + checkpoint |
 | Shared GPU (MPS) | No | No | No | Yes | Yes (webhook) |
