@@ -24,6 +24,24 @@ func TestRebalanceScriptScaleDecodeUpUsesAddDecodeManifest(t *testing.T) {
 	requireLogContains(t, log, "-n script-test wait --for=condition=Ready pod/inference-decode-1 --timeout=15m")
 }
 
+func TestRebalanceScriptScalePrefillDownDeletesAddPrefillManifest(t *testing.T) {
+	log := runRebalanceScript(t, "scale-prefill-down")
+
+	requireLogContains(t, log, "delete -f")
+	requireLogContains(t, log, "inference-disagg-rebalance-add-prefill.yaml")
+	requireLogNotContains(t, log, "inference-disagg-rebalance-base.yaml")
+	requireLogNotContains(t, log, "inference-disagg-rebalance-add-decode.yaml")
+}
+
+func TestRebalanceScriptScaleDecodeDownDeletesAddDecodeManifest(t *testing.T) {
+	log := runRebalanceScript(t, "scale-decode-down")
+
+	requireLogContains(t, log, "delete -f")
+	requireLogContains(t, log, "inference-disagg-rebalance-add-decode.yaml")
+	requireLogNotContains(t, log, "inference-disagg-rebalance-base.yaml")
+	requireLogNotContains(t, log, "inference-disagg-rebalance-add-prefill.yaml")
+}
+
 func TestRebalanceScriptApplyBaseWaitsForBasePods(t *testing.T) {
 	log := runRebalanceScript(t, "apply-base")
 
@@ -96,5 +114,13 @@ func requireLogContains(t *testing.T, log string, want string) {
 
 	if !strings.Contains(log, want) {
 		t.Fatalf("expected fake kubectl log to contain %q\nlog:\n%s", want, log)
+	}
+}
+
+func requireLogNotContains(t *testing.T, log string, want string) {
+	t.Helper()
+
+	if strings.Contains(log, want) {
+		t.Fatalf("expected fake kubectl log not to contain %q\nlog:\n%s", want, log)
 	}
 }

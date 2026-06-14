@@ -51,6 +51,7 @@ rebalancing:
   tick_interval_seconds: 5
   sustain_window_seconds: 15
   cooldown_seconds: 60
+  drain_timeout_seconds: 300
   allow_scale_up: true
   allow_scale_down: false
 
