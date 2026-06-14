@@ -1,11 +1,27 @@
 #!/bin/bash
 
 # Test GPU scheduling with real GPU workloads that consume memory
-# Requires: Vast.ai or similar GPU cluster with 4 GPUs
+# Requires: Vast.ai/Lambda or similar GPU cluster with 4 GPUs
 
 set -e
 
 echo "=== Cleaning up existing pods ==="
+CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || echo "unknown")"
+CURRENT_NAMESPACE="$(kubectl config view --minify --output 'jsonpath={..namespace}' 2>/dev/null || true)"
+if [ -z "${CURRENT_NAMESPACE}" ]; then
+  CURRENT_NAMESPACE="default"
+fi
+
+echo "Kubernetes context: ${CURRENT_CONTEXT}"
+echo "Kubernetes namespace: ${CURRENT_NAMESPACE}"
+echo ""
+echo "WARNING: this will delete all existing pods in the current namespace."
+read -r -p "Type 'continue' to proceed, or anything else to stop: " CONFIRM
+if [ "${CONFIRM}" != "continue" ]; then
+  echo "Aborted. No pods were deleted."
+  exit 0
+fi
+
 kubectl delete pod --all --ignore-not-found
 sleep 3
 
@@ -58,7 +74,7 @@ metadata:
   name: gpu-memory-stress
   annotations:
     gpu-scheduler/priority: "90"
-    gpu-scheduler/workflow: "train"
+    gpu-scheduler/workflow: "training"
 spec:
   schedulerName: gpu-scheduler
   restartPolicy: Never

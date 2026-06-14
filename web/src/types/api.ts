@@ -116,6 +116,38 @@ export interface LogResponse {
   total: number;
 }
 
+export type InferenceRole = 'prefill' | 'decode' | 'unified' | 'unknown';
+export type WorkerState = 'starting' | 'ready' | 'draining' | 'removed';
+export type PressureState = 'normal' | 'prefill_hot' | 'decode_hot';
+
+export interface InferenceWorker {
+  id: string;
+  role: InferenceRole;
+  state: WorkerState;
+  routable: boolean;
+  gpu2gpu_ready: boolean;
+  endpoint: string;
+  model_group: string;
+}
+
+export interface WorkerStat {
+  id: string;
+  inflight: number;
+  queue_wait_p95: number;
+  ttft_p95: number;
+  itl_p95: number;
+}
+
+export interface PressureReport {
+  model_group: string;
+  inflight: number;
+  queue_wait_p95: number;
+  ttft_p95: number;
+  itl_p95: number;
+  pressure_state: PressureState;
+  timestamp: string;
+}
+
 export type SSEEventType =
   | 'pod-scheduled'
   | 'preemption'

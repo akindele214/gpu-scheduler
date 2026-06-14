@@ -91,4 +91,31 @@ var (
 		},
 		[]string{"reason"}, // reason: "priority", "resource_pressure"
 	)
+
+	ProxyRequestsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "inference_proxy",
+			Subsystem: "inference_endpoint",
+			Name:      "proxy_requests_total",
+			Help:      "Total number of request proxy handled by the proxy",
+		}, []string{"route_mode"}, // unified, disagg
+	)
+
+	ProxyErrorTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "inference_proxy",
+			Subsystem: "inference_endpoint",
+			Name:      "proxy_error_total",
+			Help:      "Total number of proxy request failures by reason.",
+		}, []string{"reason"}, // no_capacity, no_disagg_pair, upstream_error, kv_missing
+	)
+	ProxyLatency = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "inference_proxy",
+			Subsystem: "inference_endpoint",
+			Name:      "proxy_latency_seconds",
+			Help:      "Time taken to complete a proxy request in seconds.",
+			Buckets:   prometheus.DefBuckets, // or custom: []float64{0.01, 0.05, 0.1, 0.5, 1, 5}
+		},
+	)
 )

@@ -13,6 +13,7 @@ func main() {
 	url := flag.String("url", "http://localhost:8000", "vLLM server URL")
 	model := flag.String("model", "meta-llama/Llama-3.1-8B", "Model name")
 	promptsFile := flag.String("prompts", "internal/benchmark/puzzle.txt", "Path to prompts CSV file")
+	metricsURL := flag.String("metrics-url", "", "URL for scraping /metrics (defaults to --url)")
 	maxTokens := flag.Int("max-tokens", 100, "Max tokens per request")
 	requests := flag.Int("requests", 10, "Number of requests per concurrency level")
 	flag.Parse()
@@ -29,9 +30,15 @@ func main() {
 		MaxTokens:   *maxTokens,
 		NumRequests: *requests,
 		Prompts:     prompts,
+		MetricsURL: func() string {
+			if *metricsURL != "" {
+				return *metricsURL
+			}
+			return *url
+		}(),
 	}
 	runner := benchmark.NewRunner(runnerCfg)
-	concurrencyLevels := []int{1, 5, 10, 25, 50, 100}
+	concurrencyLevels := []int{50, 100, 150, 200}
 	var results []benchmark.BenchMarkResult
 	for _, c := range concurrencyLevels {
 		fmt.Printf("Running %d concurrent requests ...\n", c)

@@ -297,8 +297,54 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/dashboard/pods/", h.DeletePodsHandler)
 	mux.HandleFunc("/api/v1/dashboard/events", h.EventHandler)
 	mux.HandleFunc("/api/v1/dashboard/config", h.ConfigHandler)
+	mux.HandleFunc("/api/v1/dashboard/proxy/pressure", h.ProxyPressureHandler)
+	mux.HandleFunc("/api/v1/dashboard/proxy/worker-stats", h.ProxyWorkerStatsHandler)
 	mux.HandleFunc("GET /api/v1/dashboard/pods/{namespace}/{name}/logs", h.PodLogsHandler)
 	mux.HandleFunc("/api/v1/dashboard/logs", h.LogsHandler)
+}
+
+func (h *Handler) ProxyPressureHandler(w http.ResponseWriter, r *http.Request) {
+	h.proxyControlHandler(w, r, "/api/v1/control/pressure")
+}
+
+func (h *Handler) ProxyWorkerStatsHandler(w http.ResponseWriter, r *http.Request) {
+	h.proxyControlHandler(w, r, "/api/v1/control/worker-stats")
+}
+
+func (h *Handler) proxyControlHandler(w http.ResponseWriter, r *http.Request, path string) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !h.config.ProxyConfig.Enabled {
+		http.Error(w, "proxy is disabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", h.config.ProxyConfig.Port, path)
+	if r.URL.RawQuery != "" {
+		url += "?" + r.URL.RawQuery
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 func (h *Handler) BuildClusterResponse() ClusterResponse {

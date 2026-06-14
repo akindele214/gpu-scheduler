@@ -4,6 +4,8 @@ package agent
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -41,12 +43,14 @@ func (p *NVMLProviderImpl) Collect(nodeName string) (*GPUReport, error) {
 	}
 
 	gpus := make([]GPUInfo, 0, deviceCount)
+	devices := make([]nvml.Device, 0, deviceCount)
 
 	for i := 0; i < deviceCount; i++ {
 		device, ret := nvml.DeviceGetHandleByIndex(i)
 		if ret != nvml.SUCCESS {
 			return nil, fmt.Errorf("failed to get device handle for index %d: %v", i, nvml.ErrorString(ret))
 		}
+		devices = append(devices, device)
 
 		gpu, err := collectGPUInfo(device, i)
 		if err != nil {
@@ -58,9 +62,29 @@ func (p *NVMLProviderImpl) Collect(nodeName string) (*GPUReport, error) {
 
 	return &GPUReport{
 		NodeName:  nodeName,
+		HasNVLink: collectHasNVLink(devices),
 		GPUs:      gpus,
 		Timestamp: time.Now(),
 	}, nil
+}
+
+func collectHasNVLink(devices []nvml.Device) bool {
+	if override := os.Getenv("GPU_SCHEDULER_AGENT_HAS_NVLINK_OVERRIDE"); override != "" {
+		value, err := strconv.ParseBool(override)
+		if err == nil {
+			return value
+		}
+	}
+
+	for i := 0; i < len(devices); i++ {
+		for j := i + 1; j < len(devices); j++ {
+			status, ret := devices[i].GetP2PStatus(devices[j], nvml.P2P_CAPS_INDEX_NVLINK)
+			if ret == nvml.SUCCESS && status == nvml.P2P_STATUS_OK {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func collectGPUInfo(device nvml.Device, index int) (GPUInfo, error) {

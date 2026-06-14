@@ -3,9 +3,9 @@ set -euo pipefail
 
 # ── configuration ─────────────────────────────────────────────────────────────
 
-SSH_KEY="vast-key"
-SSH_USER="root"
-SERVER="173.185.79.174:44024"    # server node ip:ssh_port
+SSH_KEY="<ssh_key>"
+SSH_USER="<ssh_user>"
+SERVER="<server_node_ip:ssh_port>"    # server node ip:ssh_port
 REMOTE_DIR="/root/gpu-scheduler"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -23,7 +23,6 @@ echo "[1/4] Syncing source code to server..."
 rsync -av \
   --exclude '.git' \
   --exclude 'bin' \
-  --exclude 'vast-key' \
   -e "ssh -i ${SSH_KEY} -p ${SERVER_PORT}" \
   "${PROJECT_DIR}/" "${SSH_USER}@${SERVER_IP}:${REMOTE_DIR}/"
 
@@ -47,7 +46,7 @@ sleep 1
 ${SSH_CMD} "cd ${REMOTE_DIR} && sed -i 's/mockMode: true/mockMode: false/' config.yaml"
 
 ${SSH_CMD} \
-  "cd ${REMOTE_DIR} && KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+  "cd ${REMOTE_DIR} && \
     nohup ./scheduler > scheduler.log 2>&1 &"
 
 echo ""

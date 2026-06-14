@@ -3,18 +3,16 @@ set -euo pipefail
 
 # ── configuration ─────────────────────────────────────────────────────────────
 
-SSH_KEY="/Users/akindele214/Desktop/Dev/go_projects/go-scheduler/vast-key"
+SSH_KEY="<ssh_key_directory>"
 SSH_USER="root"
 
 # k3s server details (ip:ssh_port)
-K3S_SERVER="173.185.79.174:44024"
-K3S_API_PORT="44169"          # external port mapped to k3s 6443
-K3S_TOKEN="K10890f719c8fea460f3cd3ad48e653694e3620c6b1a7c1f6613e37b66213db3830::server:90bcec65f5de5ff2560c4cd576e32650"
+K3S_SERVER="192.168.1.1:1"
+K3S_API_PORT="22"          # external port mapped to k3s 6443
+K3S_TOKEN="<k3s_token>:::"
 
 # Add worker nodes here as "ip:port" (port defaults to 22 if omitted)
 NODES=(
-  # 173.185.79.174:44024
-  "188.242.219.244:35251"
 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -147,5 +145,3 @@ echo ""
 echo "=== Done. Set up ${#NODES[@]} worker(s) ==="
 echo "Verify with: kubectl get nodes (on server)"
 
-# sudo iptables -t nat -I OUTPUT 1 -d 173.185.79.174 -p tcp --dport 6443 -j DNAT --to-destination 173.185.79.174:44169
-# sudo iptables -t nat -L OUTPUT -n --line-numbers

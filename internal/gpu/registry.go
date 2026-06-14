@@ -34,6 +34,7 @@ type PodAllocation struct {
 
 type NodeGPUs struct {
 	NodeName   string          `json:"node_name"`
+	HasNVLink  bool            `json:"has_nvlink"`
 	GPUs       []agent.GPUInfo `json:"gpus"`
 	ReportedAt time.Time       `json:"reported_at"`
 }
@@ -55,6 +56,7 @@ func (r *Registry) UpdateFromReport(report *agent.GPUReport) {
 	reportTime := time.Now()
 	r.lastSeen[report.NodeName] = reportTime
 	r.nodes[report.NodeName] = &NodeGPUs{
+		HasNVLink:  report.HasNVLink,
 		NodeName:   report.NodeName,
 		ReportedAt: reportTime,
 		GPUs:       report.GPUs,
@@ -177,8 +179,12 @@ func (r *Registry) FindAvailableFullGPU(minMemoryMB int) []GPUCandidate {
 				continue
 			}
 
-			// Subtract scheduler reservations from agent-reported free memory
+			// Prefer agent-reported free memory, but tolerate older/partial
+			// reports that only include total and used memory.
 			freeMB := gpu.FreeMemoryMB
+			if freeMB == 0 && gpu.TotalMemoryMB > gpu.UsedMemoryMB {
+				freeMB = gpu.TotalMemoryMB - gpu.UsedMemoryMB
+			}
 			if nodeReservations != nil {
 				freeMB -= nodeReservations[gpu.UUID]
 			}
@@ -431,6 +437,7 @@ func (r *Registry) GetNodes() []types.NodeInfo {
 				IsHealthy:          g.IsHealthy,
 				AllocatedPods:      podCount,
 				IsShared:           false,
+				IsMPS:              g.MPSEnabled,
 			}
 			gpus = append(gpus, gpu)
 			if g.IsHealthy {

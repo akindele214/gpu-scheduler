@@ -1,0 +1,225 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-prefill-0-svc
+  namespace: default
+  labels:
+    app: inference-disagg-rebalance
+    role: prefill
+    worker: prefill-0
+spec:
+  type: NodePort
+  selector:
+    app: inference-disagg-rebalance
+    role: prefill
+    worker: prefill-0
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 20001
+      nodePort: 30101
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-decode-0-svc
+  namespace: default
+  labels:
+    app: inference-disagg-rebalance
+    role: decode
+    worker: decode-0
+spec:
+  type: NodePort
+  selector:
+    app: inference-disagg-rebalance
+    role: decode
+    worker: decode-0
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 20002
+      nodePort: 30102
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inference-prefill-0
+  namespace: default
+  labels:
+    app: inference-disagg-rebalance
+    role: prefill
+    worker: prefill-0
+  annotations:
+    gpu-scheduler/workflow: "inference"
+    gpu-scheduler/priority: "90"
+    gpu-scheduler/preemptible: "false"
+    gpu-scheduler/memory-mb: "20000"
+    gpu-scheduler/gpu-count: "1"
+    gpu-scheduler/shared: "false"
+    gpu-scheduler/inference-role: "prefill"
+    gpu-scheduler/model-group: "Qwen/Qwen2.5-7B-Instruct"
+    gpu-scheduler/inference-endpoint: "http://127.0.0.1:30101"
+spec:
+  schedulerName: gpu-scheduler
+  restartPolicy: Always
+  containers:
+    - name: vllm-prefill
+      image: vllm/vllm-openai:latest
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: VLLM_USE_DEEP_GEMM
+          value: "0"
+        - name: VLLM_MOE_USE_DEEP_GEMM
+          value: "0"
+        - name: VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER
+          value: "0"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+          value: "5600"
+      command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+      args:
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "20001"
+        - "--model"
+        - "Qwen/Qwen2.5-7B-Instruct"
+        - "--dtype"
+        - "bfloat16"
+        - "--max-model-len"
+        - "4096"
+        - "--gpu-memory-utilization"
+        - "0.8"
+        - "--kv-transfer-config"
+        - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+      ports:
+        - containerPort: 20001
+          name: http
+        - containerPort: 5600
+          name: nixl
+      startupProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 120
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+        requests:
+          nvidia.com/gpu: "1"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inference-decode-0
+  namespace: default
+  labels:
+    app: inference-disagg-rebalance
+    role: decode
+    worker: decode-0
+  annotations:
+    gpu-scheduler/workflow: "inference"
+    gpu-scheduler/priority: "90"
+    gpu-scheduler/preemptible: "false"
+    gpu-scheduler/memory-mb: "20000"
+    gpu-scheduler/gpu-count: "1"
+    gpu-scheduler/shared: "false"
+    gpu-scheduler/inference-role: "decode"
+    gpu-scheduler/model-group: "Qwen/Qwen2.5-7B-Instruct"
+    gpu-scheduler/inference-endpoint: "http://127.0.0.1:30102"
+spec:
+  schedulerName: gpu-scheduler
+  restartPolicy: Always
+  containers:
+    - name: vllm-decode
+      image: vllm/vllm-openai:latest
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: VLLM_USE_DEEP_GEMM
+          value: "0"
+        - name: VLLM_MOE_USE_DEEP_GEMM
+          value: "0"
+        - name: VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER
+          value: "0"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+          value: "5601"
+      command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+      args:
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "20002"
+        - "--model"
+        - "Qwen/Qwen2.5-7B-Instruct"
+        - "--dtype"
+        - "bfloat16"
+        - "--max-model-len"
+        - "4096"
+        - "--gpu-memory-utilization"
+        - "0.8"
+        - "--kv-transfer-config"
+        - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+      ports:
+        - containerPort: 20002
+          name: http
+        - containerPort: 5601
+          name: nixl
+      startupProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 120
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+        requests:
+          nvidia.com/gpu: "1"

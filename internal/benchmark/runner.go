@@ -16,6 +16,7 @@ import (
 
 type RunnerConfig struct {
 	BaseURL     string
+	MetricsURL  string
 	Model       string
 	MaxTokens   int
 	NumRequests int
@@ -28,7 +29,16 @@ type completionRequest struct {
 	MaxTokens int    `json:"max_tokens"`
 	Stream    bool   `json:"stream"`
 }
+type ChatCompletionRequest struct {
+	Model    string        `json:"model"`
+	Messages []ChatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+}
 
+type ChatMessage struct {
+	Role    string `json:"role"`    // "system" | "user" | "assistant"
+	Content string `json:"content"` // text-only V1
+}
 type Runner struct {
 	Client http.Client
 	Config RunnerConfig
@@ -36,7 +46,7 @@ type Runner struct {
 
 func NewRunner(cfg RunnerConfig) *Runner {
 	return &Runner{
-		Client: *http.DefaultClient,
+		Client: http.Client{Timeout: 120 * time.Second},
 		Config: cfg,
 	}
 }
@@ -47,19 +57,27 @@ func (r *Runner) sendRequest(requestID int) *RequestMetrics {
 	var lastTokenTime time.Time
 
 	tokenCount := 0
-	url := r.Config.BaseURL + "/v1/completions"
+	url := r.Config.BaseURL + "/v1/chat/completions"
 	prompt := fmt.Sprintf("%s (Request #%d)", r.Config.Prompts[requestID], requestID)
-
-	completionReq := completionRequest{
-		Model:     r.Config.Model,
-		Prompt:    prompt,
-		MaxTokens: r.Config.MaxTokens,
-		Stream:    true,
+	completionReq := ChatCompletionRequest{
+		Model:  r.Config.Model,
+		Stream: true,
+		Messages: []ChatMessage{
+			{Role: "user", Content: prompt},
+		},
 	}
+	// completionReq := completionRequest{
+	// 	Model:     r.Config.Model,
+	// 	Prompt:    prompt,
+	// 	MaxTokens: r.Config.MaxTokens,
+	// 	Stream:    true,
+	// }
 	body, err := json.Marshal(completionReq)
 
 	if err != nil {
-		return &RequestMetrics{}
+		return &RequestMetrics{
+			Error: err,
+		}
 	}
 	requestStart := time.Now()
 	resp, err := r.Client.Post(url, "application/json", bytes.NewReader(body))
@@ -116,7 +134,7 @@ func (r *Runner) sendRequest(requestID int) *RequestMetrics {
 }
 
 func (r *Runner) scrapeMetrics() *ServerMetrics {
-	url := r.Config.BaseURL + "/metrics"
+	url := r.Config.MetricsURL + "/metrics"
 	resp, err := r.Client.Get(url)
 	if err != nil {
 		return &ServerMetrics{}
@@ -167,7 +185,11 @@ func (r *Runner) Run(concurrency int) BenchMarkResult {
 			defer func() { <-sem }() // Release: free the slot
 			workerRes := r.sendRequest(i)
 			ops.Add(1)
-			fmt.Printf("[%d/%d] Completed\n", int(ops.Load()), r.Config.NumRequests)
+			if workerRes.Error != nil {
+				fmt.Printf("[%d/%d] Completed (Error: %s)\n", int(ops.Load()), r.Config.NumRequests, workerRes.Error.Error())
+			} else {
+				fmt.Printf("[%d/%d] Completed\n", int(ops.Load()), r.Config.NumRequests)
+			}
 			results <- *workerRes
 		})
 	}
