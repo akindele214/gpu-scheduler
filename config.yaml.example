@@ -2,6 +2,12 @@ scheduler:
   name: "gpu-scheduler"
   port: 8888
   metricsPort: 9090
+  mode: "standalone"
+  preemptionEnabled: false
+  checkpointTimeoutSeconds: 60
+  preemptionGracePeriod: 30
+  autoResumeMaxRetries: 3
+  autoResumePriorityBoost: 5
 
 queue:
   maxSize: 1000
@@ -18,3 +24,36 @@ kubernetes:
 logging:
   level: "info"  # debug | info | warn | error
   format: "json"  # json | text
+
+proxy:
+  enabled: true
+  port: 8080
+  scheduler_url: "http://localhost:8888"
+
+rebalancing:
+  # Keep disabled in the example so a copied config does not start a control loop by surprise.
+  enabled: false
+  # Dry-run logs decisions without creating/deleting workers. Keep true until the policy looks sane.
+  dry_run: true
+  tick_interval_seconds: 5
+  sustain_window_seconds: 30
+  cooldown_seconds: 90
+  allow_scale_up: true
+  # Scale-down needs drain semantics, so keep it off for the first controller version.
+  allow_scale_down: false
+
+  model_groups:
+    - name: "Qwen/Qwen2.5-7B-Instruct"
+      ttft_hot_ms: 800
+      itl_hot_ms: 120
+      max_prefill_workers: 2
+      max_decode_workers: 2
+      # Optional. Empty means this model group is evaluated/logged only and will not mutate the cluster.
+      execution_script: ""
+
+    - name: "Qwen/Qwen2.5-14B-Instruct"
+      ttft_hot_ms: 1200
+      itl_hot_ms: 180
+      max_prefill_workers: 2
+      max_decode_workers: 1
+      execution_script: ""

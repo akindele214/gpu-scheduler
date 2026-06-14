@@ -215,12 +215,29 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 	defer timer.ObserveDuration()
 	nodes := w.registry.GetNodes() // Use registry for live agent data
 	gpuCount := GetGPUCountFromPod(pod)
+	intent := GetDisaggPodIntent(pod)
 	memoryMB := GetGPUMemoryFromPod(pod)
 
 	// Log scheduling request
 	log.Printf("[SCHEDULE] Pod %s/%s requesting %d GPU(s), %d MB memory",
 		pod.Namespace, pod.Name, gpuCount, memoryMB)
+	log.Printf("[POD InferenceIntent] Role %s, IsDisAgg %v, IsValid %v,modelGroup %s", intent.Role, intent.IsDisagg, intent.IsValid, intent.ModelGroup)
 
+	if !intent.IsValid {
+		log.Printf("[SCHEDULE] Invalid disagg intent for pod %s/%s: role=%s modelGroup=%q reason=%s",
+			pod.Namespace, pod.Name, intent.Role, intent.ModelGroup, intent.Reason)
+		metrics.GPUJobsFailed.WithLabelValues("invalid_disagg_intent").Inc()
+
+		w.publisher.Publish("pod-schedule-failed", map[string]string{
+			"pod":        pod.Name,
+			"namespace":  pod.Namespace,
+			"reason":     "invalid_disagg_intent",
+			"role":       string(intent.Role),
+			"modelGroup": intent.ModelGroup,
+			"detail":     intent.Reason,
+		})
+		return
+	}
 	// Log available resources
 	for _, node := range nodes {
 		for _, gpu := range node.GPUs {
@@ -250,43 +267,12 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 		result, err := w.strategy.ScheduleGang(job, nodes, gpuCount, memoryMode)
 		if err != nil {
 			log.Printf("Failed to schedule pod %s/%s: %v", pod.Namespace, pod.Name, err)
-			if w.preemptionOrchestrator != nil {
-				candidates := w.buildPreemptionCandidates(pod)
-				ctx := context.Background()
-				victims, preemptErr := w.preemptionOrchestrator.Preempt(ctx, GetPriorityFromPod(pod, w.workflowCfg), memoryMB, candidates)
-				if preemptErr != nil {
-					log.Printf("[PREEMPT] No preemption possible for %s/%s: %v", pod.Namespace, pod.Name, preemptErr)
-				} else {
-					for _, v := range victims {
-						w.registry.ReleasePod(v.Pod.Namespace, v.Pod.Name)
-						w.pendingEvictions[fmt.Sprintf("%s/%s", v.Pod.Namespace, v.Pod.Name)] = time.Now()
-					}
-					log.Printf("[PREEMPT] Evicted %d pod(s) for %s/%s, will retry on next cycle", len(victims), pod.Namespace, pod.Name)
-					return
-				}
-			}
-			metrics.GPUJobsFailed.WithLabelValues("no_capacity").Inc()
+			w.handleNoCapacityForPod(pod, memoryMB)
 			return
 		}
 		if result == nil {
 			log.Printf("No suitable node found for pod %s/%s", pod.Namespace, pod.Name)
-			if w.preemptionOrchestrator != nil {
-				candidates := w.buildPreemptionCandidates(pod)
-				ctx := context.Background()
-				victims, err := w.preemptionOrchestrator.Preempt(ctx, GetPriorityFromPod(pod, w.workflowCfg), memoryMB, candidates)
-				if err != nil {
-					log.Printf("[PREEMPT] No preemption possible for %s/%s: %v", pod.Namespace, pod.Name, err)
-					return
-				}
-				for _, v := range victims {
-					w.registry.ReleasePod(v.Pod.Namespace, v.Pod.Name)
-					w.pendingEvictions[fmt.Sprintf("%s/%s", v.Pod.Namespace, v.Pod.Name)] = time.Now()
-				}
-				log.Printf("[PREEMPT] Evicted %d pod(s) for %s/%s, will retry on next cycle", len(victims), pod.Namespace, pod.Name)
-				return
-			}
-
-			metrics.GPUJobsFailed.WithLabelValues("no_capacity").Inc()
+			w.handleNoCapacityForPod(pod, memoryMB)
 			return
 		}
 		nodeName = result.Placements[0].NodeName
@@ -298,28 +284,32 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 		}
 	} else {
 		// Single GPU: route through AllocateWithRouting (handles mig/full/auto)
-		result, err := w.allocator.AllocateWithRouting(pod, job)
-		if err != nil {
-			log.Printf("Failed to schedule pod %s/%s: %v", pod.Namespace, pod.Name, err)
-
-			// Attempt preemption if enabled
-			if w.preemptionOrchestrator != nil {
-				candidates := w.buildPreemptionCandidates(pod)
-				ctx := context.Background()
-				victims, preemptErr := w.preemptionOrchestrator.Preempt(ctx, GetPriorityFromPod(pod, w.workflowCfg), memoryMB, candidates)
-				if preemptErr != nil {
-					log.Printf("[PREEMPT] No preemption possible for %s/%s: %v", pod.Namespace, pod.Name, preemptErr)
-				} else {
-					for _, v := range victims {
-						w.registry.ReleasePod(v.Pod.Namespace, v.Pod.Name)
-						w.pendingEvictions[fmt.Sprintf("%s/%s", v.Pod.Namespace, v.Pod.Name)] = time.Now()
-					}
-					log.Printf("[PREEMPT] Evicted %d pod(s) for %s/%s, will retry on next cycle", len(victims), pod.Namespace, pod.Name)
-					return
+		var result *types.SchedulingResult
+		var err error
+		if intent.IsDisagg {
+			// result, err = w.allocator.AllocateWithRouting(pod, job)
+			preferredNodes := w.resolveDisaggPreferredNodes(pod, intent)
+			candidate := selectDisaggFullGPUCandidate(nodes, preferredNodes, job.MemoryMB)
+			if candidate == nil {
+				err = fmt.Errorf("unable to fit pod in non-shared gpu")
+			} else {
+				err = nil
+				result = &types.SchedulingResult{
+					JobID:     job.ID,
+					NodeName:  candidate.NodeName,
+					GPUIDs:    []string{candidate.GPUID},
+					Success:   true,
+					Reason:    fmt.Sprintf("Allocated full GPU %s", candidate.GPUID),
+					Timestamp: time.Now(),
+					IsMIG:     false,
 				}
 			}
-
-			metrics.GPUJobsFailed.WithLabelValues("no_capacity").Inc()
+		} else {
+			result, err = w.allocator.AllocateWithRouting(pod, job)
+		}
+		if err != nil {
+			log.Printf("Failed to schedule pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			w.handleNoCapacityForPod(pod, memoryMB)
 			return
 		}
 
@@ -356,7 +346,15 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 	); patchErr != nil {
 		log.Printf("Warning: failed to annotate pod %s/%s with GPU assignment: %v", pod.Namespace, pod.Name, patchErr)
 	}
+	w.bindPodAndRecord(pod, nodeName, gpuAnnotation)
+}
 
+func (w *Watcher) rollbackPlacementReservation(pod *corev1.Pod) {
+	metrics.GPUJobsFailed.WithLabelValues("bind_failed").Inc()
+	w.registry.ReleasePod(pod.Namespace, pod.Name)
+}
+
+func (w *Watcher) bindPodAndRecord(pod *corev1.Pod, nodeName, gpuAnnotation string) {
 	binding := &corev1.Binding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pod.Name,
@@ -369,10 +367,7 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 	}
 	if err := w.clientSet.CoreV1().Pods(pod.Namespace).Bind(context.TODO(), binding, metav1.CreateOptions{}); err != nil {
 		log.Printf("Failed to bind pod %s/%s to node %s: %v", pod.Namespace, pod.Name, nodeName, err)
-		metrics.GPUJobsFailed.WithLabelValues("bind_failed").Inc()
-		if releaseErr := w.gpuManager.Release(job.ID); releaseErr != nil {
-			log.Printf("Failed to release GPUs for pod %s/%s: %v", pod.Namespace, pod.Name, releaseErr)
-		}
+		w.rollbackPlacementReservation(pod)
 		return
 	}
 
@@ -383,7 +378,138 @@ func (w *Watcher) schedulePod(pod *corev1.Pod) {
 		"pod": pod.Name, "namespace": pod.Namespace,
 		"node": nodeName, "gpus": gpuAnnotation,
 	})
+}
 
+func (w *Watcher) handleNoCapacityForPod(pod *corev1.Pod, memoryMB int) {
+	if w.preemptionOrchestrator != nil {
+		candidates := w.buildPreemptionCandidates(pod)
+		ctx := context.Background()
+		victims, preemptErr := w.preemptionOrchestrator.Preempt(ctx, GetPriorityFromPod(pod, w.workflowCfg), memoryMB, candidates)
+		if preemptErr != nil {
+			log.Printf("[PREEMPT] No preemption possible for %s/%s: %v", pod.Namespace, pod.Name, preemptErr)
+		} else {
+			for _, v := range victims {
+				w.registry.ReleasePod(v.Pod.Namespace, v.Pod.Name)
+				w.pendingEvictions[fmt.Sprintf("%s/%s", v.Pod.Namespace, v.Pod.Name)] = time.Now()
+			}
+			log.Printf("[PREEMPT] Evicted %d pod(s) for %s/%s, will retry on next cycle", len(victims), pod.Namespace, pod.Name)
+			return
+		}
+	}
+	metrics.GPUJobsFailed.WithLabelValues("no_capacity").Inc()
+}
+
+func (w *Watcher) resolveDisaggPreferredNodes(pod *corev1.Pod, intent *types.DisaggPodIntent) []string {
+	if intent.Role != types.Prefill && intent.Role != types.Decode {
+		return []string{}
+	}
+
+	ctx := context.Background()
+	allPods, err := w.clientSet.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Printf("Error fetching pods: %v", err)
+		return []string{}
+	}
+
+	complementaryRole := types.Prefill
+	if intent.Role == types.Prefill {
+		complementaryRole = types.Decode
+	}
+
+	var complementaryNodes []string
+	var fallbackNodes []string
+	seen := map[string]bool{}
+
+	for _, runningPod := range allPods.Items {
+		if runningPod.Spec.SchedulerName != w.schedulerName || runningPod.Status.Phase != corev1.PodRunning || runningPod.Spec.NodeName == "" {
+			continue
+		}
+
+		if intent.ModelGroup != GetPodModelGroup(&runningPod) {
+			continue
+		}
+
+		role := GetPodInferenceRole(&runningPod)
+		node := runningPod.Spec.NodeName
+
+		if role == complementaryRole {
+			if !seen[node] {
+				complementaryNodes = append(complementaryNodes, node)
+				seen[node] = true
+			}
+			continue
+		}
+
+		if role == intent.Role {
+			if !seen[node] {
+				fallbackNodes = append(fallbackNodes, node)
+				seen[node] = true
+			}
+		}
+	}
+	return append(complementaryNodes, fallbackNodes...)
+}
+
+type disaggFullGPUCandidate struct {
+	NodeName     string
+	GPUID        string
+	FreeMemoryMB int
+}
+
+func selectDisaggFullGPUCandidate(nodes []types.NodeInfo, preferredNodes []string, memoryMB int) *disaggFullGPUCandidate {
+	candidates := collectDisaggFullGPUCandidates(nodes, memoryMB)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	for _, preferredNode := range preferredNodes {
+		if candidate := selectBestDisaggFullGPUCandidateForNode(candidates, preferredNode); candidate != nil {
+			return candidate
+		}
+	}
+
+	return selectBestDisaggFullGPUCandidate(candidates)
+}
+
+func collectDisaggFullGPUCandidates(nodes []types.NodeInfo, memoryMB int) []disaggFullGPUCandidate {
+	candidates := []disaggFullGPUCandidate{}
+	for _, node := range nodes {
+		for _, gpu := range node.GPUs {
+			freeMemoryMB := gpu.AvailableMemoryMB()
+			if !gpu.IsHealthy || gpu.IsMPS || gpu.AllocatedPods > 0 || freeMemoryMB < memoryMB {
+				continue
+			}
+			candidates = append(candidates, disaggFullGPUCandidate{
+				NodeName:     node.Name,
+				GPUID:        gpu.ID,
+				FreeMemoryMB: freeMemoryMB,
+			})
+		}
+	}
+	return candidates
+}
+
+func selectBestDisaggFullGPUCandidateForNode(candidates []disaggFullGPUCandidate, nodeName string) *disaggFullGPUCandidate {
+	var matching []disaggFullGPUCandidate
+	for _, candidate := range candidates {
+		if candidate.NodeName == nodeName {
+			matching = append(matching, candidate)
+		}
+	}
+	return selectBestDisaggFullGPUCandidate(matching)
+}
+
+func selectBestDisaggFullGPUCandidate(candidates []disaggFullGPUCandidate) *disaggFullGPUCandidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+	best := candidates[0]
+	for _, candidate := range candidates[1:] {
+		if candidate.FreeMemoryMB < best.FreeMemoryMB {
+			best = candidate
+		}
+	}
+	return &best
 }
 
 func (w *Watcher) reconcileExistingPods() {
@@ -474,6 +600,7 @@ func (w *Watcher) scheduleGang(gang GangState) {
 		if err := w.clientSet.CoreV1().Pods(p.Pod.Namespace).Bind(context.TODO(), binding, metav1.CreateOptions{}); err != nil {
 			log.Printf("[GANG] Failed to bind pod %s/%s to node %s: %v", p.Pod.Namespace, p.Pod.Name, p.NodeName, err)
 			metrics.GPUJobsFailed.WithLabelValues("bind_failed").Inc()
+			w.registry.ReleasePod(p.Pod.Namespace, p.Pod.Name)
 			continue
 		}
 		metrics.GPUJobsScheduled.WithLabelValues(p.NodeName).Inc()
@@ -528,4 +655,41 @@ func (w *Watcher) buildPreemptionCandidates(requester *corev1.Pod) []PreemptionC
 		})
 	}
 	return candidates
+}
+
+func (w *Watcher) GetRunningPod() ([]*corev1.Pod, error) {
+	ctx := context.Background()
+	podList, err := w.clientSet.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+
+	if err != nil {
+		return nil, err
+	}
+	var allPods []*corev1.Pod
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+
+		if pod.Spec.SchedulerName != w.schedulerName {
+			continue
+		}
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		if pod.Spec.NodeName == "" {
+			continue
+		}
+
+		ready := false
+		for _, c := range pod.Status.Conditions {
+			if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+				ready = true
+				break
+			}
+		}
+		if !ready {
+			continue
+		}
+
+		allPods = append(allPods, pod)
+	}
+	return allPods, nil
 }

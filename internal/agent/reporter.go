@@ -74,6 +74,6 @@ func (r *Reporter) reportOnce() error {
 
 	}
 
-	log.Printf("Report sent successfully: %d GPUs", len(report.GPUs))
+	log.Printf("Report sent successfully: %d GPUs, has_nvlink=%t", len(report.GPUs), report.HasNVLink)
 	return nil
 }

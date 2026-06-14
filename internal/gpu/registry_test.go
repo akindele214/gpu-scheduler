@@ -495,6 +495,27 @@ func TestRegistry_FindAvailableFullGPU_IncludesBoth(t *testing.T) {
 	}
 }
 
+func TestRegistry_FindAvailableFullGPU_DerivesFreeMemoryWhenMissing(t *testing.T) {
+	r := NewRegistry()
+	r.UpdateFromReport(makeReport("node-1", []agent.GPUInfo{
+		{
+			UUID:          "GPU-DEFAULT-1111",
+			TotalMemoryMB: 81920,
+			UsedMemoryMB:  0,
+			FreeMemoryMB:  0,
+			IsHealthy:     true,
+		},
+	}))
+
+	candidates := r.FindAvailableNonMPSGPU(20000)
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 non-MPS candidate with derived free memory, got %d", len(candidates))
+	}
+	if candidates[0].FreeMemoryMB != 81920 {
+		t.Errorf("expected derived free memory 81920, got %d", candidates[0].FreeMemoryMB)
+	}
+}
+
 func TestRegistry_FindAvailableMPSGPU_EmptyWhenNoMPS(t *testing.T) {
 	r := NewRegistry()
 	r.UpdateFromReport(makeReport("node-1", []agent.GPUInfo{

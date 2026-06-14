@@ -1,0 +1,17 @@
+#!/bin/bash
+set -euo pipefail
+
+log_file="${FAKE_KUBECTL_LOG:?FAKE_KUBECTL_LOG must be set}"
+
+printf '%q ' "$@" >> "${log_file}"
+printf '\n' >> "${log_file}"
+
+if [[ ! -t 0 ]]; then
+  cat >/dev/null
+fi
+
+if [[ "${FAKE_KUBECTL_FAIL:-}" == "true" ]]; then
+  exit 1
+fi
+
+exit 0

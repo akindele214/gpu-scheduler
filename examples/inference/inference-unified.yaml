@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-unified-svc
+  namespace: default
+  labels:
+    app: inference-unified
+spec:
+  type: NodePort
+  selector:
+    app: inference-unified
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      nodePort: 30080
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inference-unified
+  namespace: default
+  labels:
+    app: inference-unified
+  annotations:
+    gpu-scheduler/workflow: "inference"
+    gpu-scheduler/priority: "90"
+    gpu-scheduler/preemptible: "false"
+    gpu-scheduler/memory-mb: "40960"
+    gpu-scheduler/gpu-count: "1"
+    gpu-scheduler/shared: "false"
+    gpu-scheduler/inference-role: "unified"
+    gpu-scheduler/model-group: "Qwen/Qwen2.5-14B-Instruct"
+    gpu-scheduler/inference-endpoint: "http://127.0.0.1:30080"
+spec:
+  schedulerName: gpu-scheduler
+  restartPolicy: Always
+  containers:
+    - name: vllm-unified
+      image: vllm/vllm-openai:latest
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: VLLM_USE_DEEP_GEMM
+          value: "0"
+        - name: VLLM_MOE_USE_DEEP_GEMM
+          value: "0"
+        - name: VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER
+          value: "0"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+      command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+      args:
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "8000"
+        - "--model"
+        - "Qwen/Qwen2.5-14B-Instruct"
+        - "--dtype"
+        - "bfloat16"
+        - "--max-model-len"
+        - "1024"
+        - "--max-num-seqs"
+        - "2"
+        - "--gpu-memory-utilization"
+        - "0.95"
+      ports:
+        - containerPort: 8000
+          name: http
+      startupProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 120
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+        requests:
+          nvidia.com/gpu: "1"
