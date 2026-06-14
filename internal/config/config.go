@@ -74,6 +74,7 @@ type RebalancingConfig struct {
 	TickIntervalSeconds  int           `mapstructure:"tick_interval_seconds" json:"tick_interval_seconds"`
 	SustainWindowSeconds int           `mapstructure:"sustain_window_seconds" json:"sustain_window_seconds"`
 	CooldownSeconds      int           `mapstructure:"cooldown_seconds" json:"cooldown_seconds"`
+	DrainTimeoutSeconds  int           `mapstructure:"drain_timeout_seconds" json:"drain_timeout_seconds"`
 	AllowScaleUp         bool          `mapstructure:"allow_scale_up" json:"allow_scale_up"`
 	AllowScaleDown       bool          `mapstructure:"allow_scale_down" json:"allow_scale_down"`
 	ModelGroups          []ModelGroups `mapstructure:"model_groups" json:"model_groups"`
@@ -162,6 +163,9 @@ func (config RebalancingConfig) Validate() error {
 	}
 	if config.CooldownSeconds <= 0 {
 		return fmt.Errorf("rebalancing.cooldown_seconds must be greater than 0")
+	}
+	if config.AllowScaleDown && config.DrainTimeoutSeconds <= 0 {
+		return fmt.Errorf("rebalancing.drain_timeout_seconds must be greater than 0")
 	}
 	if len(config.ModelGroups) == 0 {
 		return fmt.Errorf("rebalancing.model_groups must have at least one model group when enabled")

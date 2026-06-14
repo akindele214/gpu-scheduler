@@ -146,6 +146,7 @@ func TestValidate_Rebalancing(t *testing.T) {
 				TickIntervalSeconds:  5,
 				SustainWindowSeconds: 30,
 				CooldownSeconds:      90,
+				DrainTimeoutSeconds:  300,
 				AllowScaleUp:         true,
 				AllowScaleDown:       false,
 				ModelGroups: []ModelGroups{
@@ -202,6 +203,23 @@ func TestValidate_Rebalancing(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "rebalancing.cooldown_seconds must be greater than 0",
+		},
+		{
+			name: "scale down disabled allows zero drain timeout",
+			mutate: func(c *Config) {
+				c.Rebalancing.AllowScaleDown = false
+				c.Rebalancing.DrainTimeoutSeconds = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "scale down enabled requires positive drain timeout",
+			mutate: func(c *Config) {
+				c.Rebalancing.AllowScaleDown = true
+				c.Rebalancing.DrainTimeoutSeconds = 0
+			},
+			wantErr: true,
+			errMsg:  "rebalancing.drain_timeout_seconds must be greater than 0",
 		},
 		{
 			name: "enabled requires model groups",

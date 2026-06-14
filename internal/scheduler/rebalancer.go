@@ -16,6 +16,7 @@ type Rebalancer struct {
 	CooldownSeconds      int
 	AllowScaleUp         bool
 	AllowScaleDown       bool
+	DrainTimeoutSeconds  int
 	ModelGroupPolicies   []ModelGroupPolicy
 	modelGroupStates     map[string]*ModelGroupRebalanceState
 }
@@ -84,6 +85,7 @@ func NewRebalancer(cfg *config.Config) *Rebalancer {
 		CooldownSeconds:      cfg.Rebalancing.CooldownSeconds,
 		AllowScaleUp:         cfg.Rebalancing.AllowScaleUp,
 		AllowScaleDown:       cfg.Rebalancing.AllowScaleDown,
+		DrainTimeoutSeconds:  cfg.Rebalancing.DrainTimeoutSeconds,
 	}
 
 	for _, modelGroup := range cfg.Rebalancing.ModelGroups {
