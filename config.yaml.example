@@ -41,6 +41,7 @@ rebalancing:
   allow_scale_up: true
   # Scale-down needs drain semantics, so keep it off for the first controller version.
   allow_scale_down: false
+  drain_timeout_seconds: 300
 
   model_groups:
     - name: "Qwen/Qwen2.5-7B-Instruct"

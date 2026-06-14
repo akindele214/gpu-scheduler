@@ -164,6 +164,20 @@ func GetResumeCmdFromPod(pod *corev1.Pod) string {
 	return pod.Annotations["gpu-scheduler/resume-cmd"]
 }
 
+func IsDrainingGPUPod(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	value, exists := pod.Annotations["gpu-scheduler/draining"]
+	if exists {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "true" {
+			return true
+		}
+	}
+	return false
+}
+
 func IsPreemptible(pod *corev1.Pod, workflowCfg config.WorkflowConfig) bool {
 	// Explicit annotation overrides workflow config
 	if value, exists := pod.Annotations["gpu-scheduler/preemptible"]; exists {
@@ -293,3 +307,4 @@ func IsInferencePod(pod *corev1.Pod) bool {
 	}
 	return false
 }
+

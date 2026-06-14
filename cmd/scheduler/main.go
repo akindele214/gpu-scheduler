@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -68,6 +69,8 @@ type Scheduler struct {
 	eventBus               *dashboard.EventBus
 	dashHandler            *dashboard.Handler
 	executeRebalanceAction func(scheduler.ModelGroupPolicy, scheduler.RebalancerDecisionResult) error
+	fetchWorkerStats        func(context.Context) ([]controlplane.WorkerStat, error)
+	drainPollInterval       time.Duration
 	stopCh                 chan struct{}
 }
 
@@ -128,6 +131,8 @@ func NewScheduler() (*Scheduler, error) {
 		stopCh:     make(chan struct{}),
 	}
 	s.executeRebalanceAction = s.handleRebalancerAction
+	s.fetchWorkerStats = s.fetchProxyWorkerStats
+	s.drainPollInterval = 2 * time.Second
 	// 6. Create Extender or Watcher based on mode
 	if cfg.Scheduler.Mode == "standalone" {
 		clientset, ok := kubeClient.(*kubernetes.Clientset)
@@ -442,9 +447,9 @@ func (s *Scheduler) checkDeduplication(policy scheduler.ModelGroupPolicy, decisi
 	case scheduler.ScaleBoth:
 		return true, nil
 	case scheduler.RemoveDecode:
-		return true, nil
+		return s.hasDrainingInferencePod(policy, types.Decode)
 	case scheduler.RemovePrefill:
-		return true, nil
+		return s.hasDrainingInferencePod(policy, types.Prefill)
 	default:
 		return true, nil
 	}
@@ -486,6 +491,189 @@ func (s *Scheduler) hasInProgressInferencePod(policy scheduler.ModelGroupPolicy,
 	return false, nil
 }
 
+func (s *Scheduler) hasDrainingInferencePod(policy scheduler.ModelGroupPolicy, targetRole types.InferenceRole) (bool, error) {
+	if s.kubeClient == nil {
+		return false, fmt.Errorf("kubernetes client is not configured")
+	}
+
+	namespace := s.config.Kubernetes.Namespace
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	pods, err := s.kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if pod.Annotations["gpu-scheduler/workflow"] != string(types.Inference) {
+			continue
+		}
+		if scheduler.GetPodModelGroup(&pod) != policy.Name {
+			continue
+		}
+		if scheduler.GetPodInferenceRole(&pod) != targetRole {
+			continue
+		}
+		if scheduler.IsDrainingGPUPod(&pod) {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (s *Scheduler) selectScaleDownTargetPod(policy scheduler.ModelGroupPolicy, targetRole types.InferenceRole) (*corev1.Pod, error) {
+	if s.kubeClient == nil {
+		return nil, fmt.Errorf("kubernetes client is not configured")
+	}
+
+	namespace := s.config.Kubernetes.Namespace
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	pods, err := s.kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := make([]corev1.Pod, 0)
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if pod.Annotations["gpu-scheduler/workflow"] != string(types.Inference) {
+			continue
+		}
+		if scheduler.GetPodModelGroup(&pod) != policy.Name {
+			continue
+		}
+		if scheduler.GetPodInferenceRole(&pod) != targetRole {
+			continue
+		}
+		if scheduler.IsDrainingGPUPod(&pod) {
+			continue
+		}
+		if !isPodReady(&pod) {
+			continue
+		}
+		candidates = append(candidates, pod)
+	}
+
+	if len(candidates) <= 1 {
+		return nil, nil
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		iTime := candidates[i].CreationTimestamp.Time
+		jTime := candidates[j].CreationTimestamp.Time
+		if iTime.Equal(jTime) {
+			return candidates[i].Name > candidates[j].Name
+		}
+		return iTime.After(jTime)
+	})
+
+	target := candidates[0]
+	return &target, nil
+}
+
+func (s *Scheduler) markPodDraining(ctx context.Context, pod *corev1.Pod, now time.Time) error {
+	if s.kubeClient == nil {
+		return fmt.Errorf("kubernetes client is not configured")
+	}
+	if pod == nil {
+		return fmt.Errorf("cannot mark nil pod as draining")
+	}
+
+	latest, err := s.kubeClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if latest.Annotations == nil {
+		latest.Annotations = map[string]string{}
+	}
+	latest.Annotations["gpu-scheduler/draining"] = "true"
+	latest.Annotations["gpu-scheduler/drain-started-at"] = now.UTC().Format(time.RFC3339)
+
+	_, err = s.kubeClient.CoreV1().Pods(latest.Namespace).Update(ctx, latest, metav1.UpdateOptions{})
+	return err
+}
+
+func (s *Scheduler) clearPodDraining(ctx context.Context, pod *corev1.Pod) error {
+	if s.kubeClient == nil {
+		return fmt.Errorf("kubernetes client is not configured")
+	}
+	if pod == nil {
+		return fmt.Errorf("cannot clear draining from nil pod")
+	}
+
+	latest, err := s.kubeClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if latest.Annotations == nil {
+		return nil
+	}
+	delete(latest.Annotations, "gpu-scheduler/draining")
+	delete(latest.Annotations, "gpu-scheduler/drain-started-at")
+
+	_, err = s.kubeClient.CoreV1().Pods(latest.Namespace).Update(ctx, latest, metav1.UpdateOptions{})
+	return err
+}
+
+func (s *Scheduler) waitForWorkerInflightZero(ctx context.Context, workerID string, timeout time.Duration) error {
+	if strings.TrimSpace(workerID) == "" {
+		return fmt.Errorf("worker ID cannot be empty")
+	}
+	if s.fetchWorkerStats == nil {
+		return fmt.Errorf("worker stats fetcher is not configured")
+	}
+	if timeout <= 0 {
+		return fmt.Errorf("drain timeout must be greater than zero")
+	}
+
+	pollInterval := s.drainPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		stats, err := s.fetchWorkerStats(ctx)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, stat := range stats {
+			if stat.ID != workerID {
+				continue
+			}
+			found = true
+			if stat.Inflight == 0 {
+				return nil
+			}
+			break
+		}
+		if !found {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for worker %q inflight requests to drain", workerID)
+		case <-ticker.C:
+		}
+	}
+}
+
 func isPodReady(pod *corev1.Pod) bool {
 	for _, condition := range pod.Status.Conditions {
 		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
@@ -497,11 +685,21 @@ func isPodReady(pod *corev1.Pod) bool {
 
 func (s *Scheduler) handleRebalancerAction(policy scheduler.ModelGroupPolicy, decision scheduler.RebalancerDecisionResult) error {
 	var scriptAction string
+	var targetRole types.InferenceRole
+	requiresDrain := false
 	switch decision.Action {
 	case scheduler.AddDecode:
 		scriptAction = "scale-decode-up"
 	case scheduler.AddPrefill:
 		scriptAction = "scale-prefill-up"
+	case scheduler.RemoveDecode:
+		scriptAction = "scale-decode-down"
+		targetRole = types.Decode
+		requiresDrain = true
+	case scheduler.RemovePrefill:
+		scriptAction = "scale-prefill-down"
+		targetRole = types.Prefill
+		requiresDrain = true
 	default:
 		return fmt.Errorf("unsupported rebalancer action %q", decision.Action)
 	}
@@ -516,6 +714,29 @@ func (s *Scheduler) handleRebalancerAction(policy scheduler.ModelGroupPolicy, de
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
+
+	if requiresDrain {
+		targetPod, err := s.selectScaleDownTargetPod(policy, targetRole)
+		if err != nil {
+			return fmt.Errorf("select scale-down target: %w", err)
+		}
+		if targetPod == nil {
+			return fmt.Errorf("no scale-down target found for model group %q role %q", policy.Name, targetRole)
+		}
+
+		workerID := fmt.Sprintf("%s/%s", targetPod.Namespace, targetPod.Name)
+		if err := s.markPodDraining(ctx, targetPod, time.Now()); err != nil {
+			return fmt.Errorf("mark worker %q draining: %w", workerID, err)
+		}
+
+		timeout := time.Duration(s.rebalancer.DrainTimeoutSeconds) * time.Second
+		if err := s.waitForWorkerInflightZero(ctx, workerID, timeout); err != nil {
+			if clearErr := s.clearPodDraining(context.Background(), targetPod); clearErr != nil {
+				return fmt.Errorf("drain worker %q: %w; failed to clear drain annotations: %v", workerID, err, clearErr)
+			}
+			return fmt.Errorf("drain worker %q: %w", workerID, err)
+		}
+	}
 
 	cmd := exec.CommandContext(ctx, scriptPath, scriptAction)
 	cmd.Env = append(os.Environ(),
@@ -645,6 +866,7 @@ func (s *Scheduler) collectInferenceWorkers() ([]controlplane.WorkerInfo, error)
 			continue
 		}
 		routable := endpoint != ""
+		draining := scheduler.IsDrainingGPUPod(pod)
 		switch podRole {
 		case types.Prefill, types.Decode:
 			routable = routable && modelGroup != ""
@@ -653,10 +875,15 @@ func (s *Scheduler) collectInferenceWorkers() ([]controlplane.WorkerInfo, error)
 		default:
 			routable = false
 		}
+		workerState := controlplane.Ready
+		if draining {
+			routable = false
+			workerState = controlplane.Draining
+		}
 		workerInfo = append(workerInfo, controlplane.WorkerInfo{
 			ID:           fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
 			Role:         podRole,
-			State:        controlplane.Ready,
+			State:        workerState,
 			Routable:     routable,
 			GPU2GPUReady: node.HasNVLink,
 			Endpoint:     endpoint,
@@ -664,6 +891,30 @@ func (s *Scheduler) collectInferenceWorkers() ([]controlplane.WorkerInfo, error)
 		})
 	}
 	return workerInfo, nil
+}
+
+func (s *Scheduler) fetchProxyWorkerStats(ctx context.Context) ([]controlplane.WorkerStat, error) {
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/control/worker-stats", s.config.ProxyConfig.Port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("proxy worker stats endpoint returned status %d", resp.StatusCode)
+	}
+
+	var stats []controlplane.WorkerStat
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return nil, err
+	}
+	return stats, nil
 }
 
 func buildKubeClient() (kubernetes.Interface, *rest.Config, error) {
